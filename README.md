@@ -4,6 +4,22 @@ Run HyperFrames edits on your laptop using **GPT-6 Astra / Low reasoning through
 
 Repository: https://github.com/mihai-ciorobitca/peptiking-hyperframe
 
+## All-in-one B-roll and background music
+
+In the normal AI Edit prompt, ask for the whole job, for example:
+
+> Create two relevant cinematic B-roll clips, choose fashion background music from Pixabay, add English captions, keep my voice clear, and assemble the finished vertical video.
+
+Astra plans the missing assets, the existing Google Flow service generates up to three clips, Astra selects a track from Pixabay's fashion search using track metadata, and HyperFrames assembles the result. Uploaded assets are preserved. Explicit requests for no music/no new footage are passed to the planner; muted output never triggers a music download. Simple trim/caption fixes and revisions should not acquire unrequested assets.
+
+**For this PeptiKing installation, the existing Flow connection has been provisioned in encrypted Supabase Vault.** The worker retrieves it using its existing Supabase login; no additional keys are needed on the laptop. Other installations must apply `asset-connection.sql` and provision a Vault secret named `peptiking_hyperframes_flow`, containing a JSON object with `url` and `key` for their existing Flow service. Only `service_role` can call the connection function. Optional `FLOW_API_URL`/`FLOW_API_KEY` worker environment overrides are supported.
+
+Google Flow generation uses the existing service's generation allowance. Astra asset planning, music selection, edit planning and any timing repair use the signed-in Codex account's allowance. Pixabay music is downloaded through its normal Free download control. Source title, creator, URL, license link and download date are saved in `music-source.json`; the unmodified track stays local, not published as a standalone music file. New B-roll and music provenance are retained with the project for revisions. Keep the original project folders on this laptop if you want to reuse their soundtracks.
+
+If Pixabay asks for login or verification, stop the worker and run `npm run music:open`, complete the prompt yourself, close that browser, and restart. No verification is bypassed. `HYPERFRAMES_AUTO_ASSETS=false` disables asset acquisition. `npm run smoke:assets` tests Astra's asset planning without generating footage or downloading music.
+
+The overall edit still has a ten-minute processing limit, including generation and rendering; begin with short videos and one or two generated clips. A failed generation cancels known pending Flow jobs; completed generated clips remain in B-Roll Creator. If a submission times out before returning an id, check B-Roll Creator before retrying to avoid duplicate generations.
+
 ## Install on the other Windows laptop
 
 Install Git, Node.js 22+, Python 3.10+ and Chrome. Python 3.10 was verified in development. Your existing HyperFrames installation can stay; this package bundles pinned HyperFrames and Codex CLIs.
@@ -85,7 +101,7 @@ npm start
 
 Main-video cuts; zoom/crop; full-frame silent B-roll with short fades; timed/translated captions; titles; speech/music levels; looped music; muted exports. Output is vertical 1080x1920, 30 fps, H.264 MP4. Source/output length and processing are limited to ten minutes. Start with short clips on slower laptops.
 
-Word-by-word animation, dubbing, generated footage, retouching, exact font reproduction and main-scene crossfades are not implemented. Unsupported material requests produce errors. Revisions use the saved plan against original footage.
+Word-by-word animation, dubbing, retouching, exact font reproduction and main-scene crossfades are not implemented. New footage is generated through the separate Flow asset stage. Unsupported material requests produce errors. Revisions use the saved plan against original footage.
 
 Editable projects/media remain in `projects/<job>-<attempt>/` and are not automatically deleted. The worker polls outbound: no incoming port, Borumi bridge or open HyperFrames UI is needed. Media hosts must be explicitly allowed in `HYPERFRAMES_MEDIA_HOSTS`. Set `CHROME_PATH` if browser discovery fails.
 
@@ -93,7 +109,7 @@ Codex receives context and thumbnails with a read-only sandbox, shell/apps/plugi
 
 ## Verification
 
-Development checks cover ChatGPT-authenticated Astra/Low planning, local transcription, real rendering, PostgreSQL queue isolation/permissions and plan validation. Website editor/dialog were checked at 1440, 834, 390 and 320 px with mocked queue responses. The other laptop and production connection still need the steps above.
+Development checks cover ChatGPT-authenticated Astra/Low edit and asset planning, local transcription, real rendering, PostgreSQL queue/connection permissions and plan validation. Flow submission/result/cancellation are tested with fixtures; the live Flow connection and owner project were verified read-only. The official Pixabay download flow was verified in a browser. Website editor/dialog were checked at 1440, 834, 390 and 320 px with mocked queue responses. A complete generated-footage-plus-music edit on the other laptop still needs a live run.
 
 Development tests: `npm ci`, then `npm test`. Tests use in-memory PostgreSQL-compatible PGlite, not production.
 

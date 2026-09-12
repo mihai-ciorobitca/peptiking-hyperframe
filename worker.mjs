@@ -7,6 +7,9 @@ import { downloadMedia, thumbnail, transcribe } from './media.mjs'
 import { requestPlan, validatePlan } from './plan.mjs'
 import { buildComposition } from './composition.mjs'
 import { verifyCodexLogin } from './codex.mjs'
+import { planAssets } from './asset-plan.mjs'
+import { generateScenes, loadFlowConnection } from './flow.mjs'
+import { acquireMusic } from './pixabay.mjs'
 
 const require = createRequire(import.meta.url)
 const TIMEOUT_MS = 10 * 60 * 1000
@@ -20,16 +23,17 @@ export async function rpc(cfg, name, body, signal) {
   return response.json()
 }
 
-async function previousPlan(job, cfg, signal) {
+async function previousEdit(job, cfg, signal) {
   const id = job.payload.parentJobId
   if (!id) return null
   const url = new URL(`${cfg.supabaseUrl}/rest/v1/AiVideoEditJob`)
-  url.search = new URLSearchParams({ id: `eq.${id}`, userId: `eq.${job.user_id}`, status: 'eq.COMPLETED', select: 'payload,result', limit: '1' })
+  if (!/^[a-zA-Z0-9_-]+$/.test(id)) throw new Error('Invalid previous edit identifier.')
+  url.search = new URLSearchParams({ id: `eq.${id}`, userId: `eq.${job.user_id}`, status: 'eq.COMPLETED', select: 'payload,result,attempts', limit: '1' })
   const response = await fetch(url, { headers: { apikey: cfg.serviceRoleKey, Authorization: `Bearer ${cfg.serviceRoleKey}` }, signal })
   if (!response.ok) throw new Error('The previous edit could not be loaded.')
   const previous = (await response.json())[0]
   if (!previous) throw new Error('The previous edit is no longer available.')
-  return previous.result?.editPlan || { previousInstructions: previous.payload?.instructions || '' }
+  return previous
 }
 
 export async function renderPlan(projectDir, plan, media, signal) {
@@ -62,13 +66,20 @@ async function editVideo(job, cfg, signal, progress) {
   const projectDir = path.join(cfg.projectsDir, `${job.job_id}-${job.attempts}`)
   const assets = path.join(projectDir, 'assets')
   await mkdir(assets, { recursive: true })
+  const previous = await previousEdit(job, cfg, signal)
+  const inheritedAssets = previous?.result?.acquiredAssets
+  const sources = [...payload.brollVideos]
+  for (const source of inheritedAssets?.generatedBrolls || []) {
+    if (!sources.some(item => item.url === source.url)) sources.push(source)
+  }
+  if (sources.length > 20) throw new Error('This revision would exceed 20 B-roll sources.')
   await progress('download', 'Downloading the selected video and B-rolls', 5)
   const mainFile = await downloadMedia(payload.mainVideo.url, path.join(assets, 'main.mp4'), cfg, signal)
   const main = await probe(mainFile, signal)
   if (!main.hasVideo || main.duration > 600) throw new Error('HyperFrames needs a main video no longer than 10 minutes.')
   const brolls = []
   const images = []
-  for (const [index, source] of payload.brollVideos.entries()) {
+  for (const [index, source] of sources.entries()) {
     const file = await downloadMedia(source.url, path.join(assets, `broll-${index+1}.mp4`), cfg, signal)
     const meta = await probe(file, signal)
     if (!meta.hasVideo) throw new Error(`B-roll ${index+1} has no video stream.`)
@@ -80,6 +91,11 @@ async function editVideo(job, cfg, signal, progress) {
     const file = await downloadMedia(payload.musicTrack.url, path.join(assets, 'music.mp3'), cfg, signal)
     music = await probe(file, signal)
     if (!music.hasAudio) throw new Error('The selected music has no audio stream.')
+  } else if (inheritedAssets?.music && !payload.requestedActions?.muteOutput) {
+    if (!Number.isInteger(previous.attempts) || previous.attempts < 1) throw new Error('Previous music source metadata is invalid.')
+    const source = path.join(cfg.projectsDir, `${payload.parentJobId}-${previous.attempts}`, 'assets', 'music.mp3')
+    await copyFile(source, path.join(assets, 'music.mp3')).catch(() => { throw new Error('The previous Pixabay music file is missing on this laptop. Restore the original project folder to preserve the soundtrack.') })
+    music = await probe(path.join(assets, 'music.mp3'), signal)
   }
   for (const [index, fraction] of [0.1,0.5,0.9].entries()) images.push({ label: `Main video at ${(main.duration*fraction).toFixed(1)} seconds`, url: await thumbnail(mainFile, main.duration*fraction, path.join(assets, `main-${index}.jpg`), signal) })
   if (payload.captionStyleReference) {
@@ -89,9 +105,45 @@ async function editVideo(job, cfg, signal, progress) {
   await progress('transcribe', 'Transcribing the speech for accurate caption timing', 25)
   const transcript = main.hasAudio ? await transcribe(mainFile, cfg, signal) : { text: '', words: [] }
   await writeFile(path.join(projectDir, 'transcript.json'), JSON.stringify(transcript))
+  let acquiredAssets = inheritedAssets ? { generatedBrolls: [...(inheritedAssets.generatedBrolls || [])], music: payload.musicTrack ? null : inheritedAssets.music } : null
+  if (cfg.autoAssets) {
+    await progress('plan-assets', 'Astra is planning B-roll and background music', 29)
+    const assetPlan = await planAssets({ instructions: payload.instructions, transcript, images, projectDir,
+      duration: main.duration, brollCount: brolls.length, hasMusic: Boolean(music),
+      muteOutput: Boolean(payload.requestedActions?.muteOutput), isRevision: Boolean(payload.parentJobId) }, cfg, signal)
+    await writeFile(path.join(projectDir, 'asset-plan.json'), JSON.stringify(assetPlan, null, 2))
+    acquiredAssets ||= { generatedBrolls: [], music: null }
+    const flowCfg = assetPlan.scenes.length ? await loadFlowConnection(cfg, signal) : cfg
+    // Music failure is resolved before spending generation allowance.
+    if (assetPlan.music) {
+      await progress('source-music', 'Astra is selecting fashion background music from Pixabay', 31)
+      const selected = await acquireMusic(assetPlan.musicBrief, projectDir, cfg, signal)
+      music = await probe(selected.file, signal)
+      if (!music.hasAudio || music.hasVideo) throw new Error('The downloaded Pixabay file is not an audio track.')
+      acquiredAssets.music = selected.provenance
+    }
+    if (assetPlan.scenes.length) {
+      const ownerUrl = new URL(`${cfg.supabaseUrl}/rest/v1/User`)
+      ownerUrl.search = new URLSearchParams({ id: `eq.${job.user_id}`, select: 'email,aiVideoFlowProjectId', limit: '1' })
+      const response = await fetch(ownerUrl, { headers: { apikey: cfg.serviceRoleKey, Authorization: `Bearer ${cfg.serviceRoleKey}` }, signal })
+      if (!response.ok) throw new Error('Could not load the B-roll generation project for this edit owner.')
+      const owner = (await response.json())[0]
+      const generated = await generateScenes(assetPlan.scenes, { email: owner?.email, projectId: owner?.aiVideoFlowProjectId }, flowCfg, signal, progress, path.join(projectDir, 'flow-jobs.json'))
+      for (const clip of generated) {
+        const index = brolls.length + 1
+        const file = await downloadMedia(clip.url, path.join(assets, `broll-${index}.mp4`), cfg, signal)
+        const meta = await probe(file, signal)
+        if (!meta.hasVideo) throw new Error(`Generated B-roll ${index} is not a playable video.`)
+        brolls.push({ duration: meta.duration, title: clip.title })
+        images.push({ label: `B-roll ${index}: ${clip.title}`, url: await thumbnail(file, Math.min(1, meta.duration / 2), path.join(assets, `broll-${index}.jpg`), signal) })
+        acquiredAssets.generatedBrolls.push({ ...clip, durationSeconds: meta.duration })
+      }
+    }
+    await writeFile(path.join(projectDir, 'asset-manifest.json'), JSON.stringify(acquiredAssets, null, 2))
+  }
   await progress('astra-edit', 'GPT-6 Astra is planning the edit · Low reasoning', 40)
   const media = { main: { duration: main.duration, hasAudio: main.hasAudio }, brolls, music: music ? { duration: music.duration } : null }
-  const plan = await requestPlan({ instructions: payload.instructions, media, transcript, previousPlan: await previousPlan(job, cfg, signal), images, projectDir }, cfg, signal)
+  const plan = await requestPlan({ instructions: `${payload.instructions}\n${acquiredAssets ? 'Asset acquisition is complete. Any generated B-rolls and selected music listed in media are available to use; do not request further generation. Include newly acquired assets while respecting explicit removal requests for previous assets.' : ''}`, media, transcript, previousPlan: previous?.result?.editPlan || (previous ? { previousInstructions: previous.payload?.instructions || '' } : null), images, projectDir }, cfg, signal)
   if (payload.requestedActions?.muteOutput) plan.muteOutput = true
   validatePlan(plan, media)
   await progress('render', 'HyperFrames is rendering the edited video', 65)
@@ -107,7 +159,7 @@ async function editVideo(job, cfg, signal, progress) {
   if (!response.ok) throw new Error(`Export upload failed (${response.status}). Verify the website storage bucket and file-size limit.`)
   await progress('finalizing', 'Finalizing the HyperFrames edit', 99)
   const videoUrl = `${cfg.supabaseUrl}/storage/v1/object/public/${encoded}`
-  return { videoUrl, downloadUrl: `${videoUrl}?download=${encodeURIComponent(fileName)}`, fileName, sizeBytes: bytes.length, completedAt: new Date().toISOString(), editor: 'hyperframes', model: cfg.model, reasoningEffort: cfg.effort, editPlan: plan, projectDir, workerId: cfg.workerId }
+  return { videoUrl, downloadUrl: `${videoUrl}?download=${encodeURIComponent(fileName)}`, fileName, sizeBytes: bytes.length, completedAt: new Date().toISOString(), editor: 'hyperframes', model: cfg.model, reasoningEffort: cfg.effort, editPlan: plan, acquiredAssets, projectDir, workerId: cfg.workerId }
 }
 
 export async function handleJob(job, cfg, outerSignal) {

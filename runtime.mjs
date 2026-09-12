@@ -28,10 +28,15 @@ export function config(env = process.env) {
     codexHome: env.HYPERFRAMES_CODEX_HOME || env.CODEX_HOME,
     python: env.HYPERFRAMES_PYTHON || path.join(serviceDir, '.venv', process.platform === 'win32' ? 'Scripts/python.exe' : 'bin/python'),
     whisperModel: env.HYPERFRAMES_WHISPER_MODEL || 'base',
+    autoAssets: env.HYPERFRAMES_AUTO_ASSETS !== 'false',
+    flowUrl: env.FLOW_API_URL?.trim().replace(/\/+$/, ''),
+    flowKey: env.FLOW_API_KEY?.trim(),
+    musicProfile: env.HYPERFRAMES_MUSIC_PROFILE,
+    musicHeadless: env.HYPERFRAMES_MUSIC_HEADLESS !== 'false',
     model, effort, bucket: env.HYPERFRAMES_EXPORT_BUCKET || 'shotstack',
     workerId: `hyperframes-${os.hostname()}-${process.pid}`,
     projectsDir: path.resolve(env.HYPERFRAMES_PROJECTS_DIR || path.join(serviceDir, 'projects')),
-    allowedMediaHosts: new Set([new URL(supabaseUrl).hostname, 'storage.googleapis.com', ...(env.HYPERFRAMES_MEDIA_HOSTS || '').split(',').map((host) => host.trim()).filter(Boolean)]),
+    allowedMediaHosts: new Set([new URL(supabaseUrl).hostname, 'storage.googleapis.com', 'labs.google', 'resource2.heygen.ai', ...(env.HYPERFRAMES_MEDIA_HOSTS || '').split(',').map((host) => host.trim()).filter(Boolean)]),
   }
 }
 

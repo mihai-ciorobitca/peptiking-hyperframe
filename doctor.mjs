@@ -1,5 +1,6 @@
 import { config, hyperframes, run, ffmpeg, ffprobePath } from './runtime.mjs'
 import { verifyCodexLogin } from './codex.mjs'
+import { loadFlowConnection } from './flow.mjs'
 
 const failures = []
 async function check(label, fn) {
@@ -13,6 +14,7 @@ await check('HyperFrames CLI', () => hyperframes(['--version']))
 let cfg
 await check('Worker configuration', async () => { cfg = config() })
 if (cfg) {
+  if (cfg.autoAssets) await check('Automatic B-roll connection', () => loadFlowConnection(cfg, AbortSignal.timeout(15000)))
   await check('Codex ChatGPT login (no API key)', () => verifyCodexLogin(cfg, AbortSignal.timeout(15000)))
   await check('Local speech transcription', () => run(cfg.python, ['-c', 'from faster_whisper import WhisperModel; print("ready")']))
   await check('Supabase queue migration (read-only)', async () => {

@@ -5,6 +5,7 @@ node_modules/
 .venv/
 __pycache__/
 .codex/
+.music-browser/
 auth.json
 *.pem
 projects/
