@@ -1,0 +1,439 @@
+diff --git a/app/api/ai-editor/video-jobs/route.ts b/app/api/ai-editor/video-jobs/route.ts
+index 6e537c9d..ac75a976 100644
+--- a/app/api/ai-editor/video-jobs/route.ts
++++ b/app/api/ai-editor/video-jobs/route.ts
+@@ -37,6 +37,7 @@ const uploadedCaptionStyleReferenceSchema = z.object({
+ 
+ const editRequestSchema = z.object({
+   kind: z.literal('edit'),
++  editor: z.enum(['borumi', 'hyperframes']).default('borumi'),
+   projectId: z.string().trim().min(1).max(160).optional(),
+   projectName: z.string().trim().min(1).max(120),
+   targetBrollIndex: z.number().int().min(1).max(20).nullable().optional(),
+@@ -91,14 +92,16 @@ export async function POST(request: Request) {
+ 
+   const body = await request.json().catch(() => null)
+   if (!body || body.kind === 'connection') {
+-    const job = await createBorumiConnectionJob(access.userId)
++    const editor = body?.editor ?? 'borumi'
++    if (editor !== 'borumi' && editor !== 'hyperframes') return NextResponse.json({ error: 'Unknown video editor.' }, { status: 400 })
++    const job = await createBorumiConnectionJob(access.userId, editor)
+     return NextResponse.json({ job }, { status: 202 })
+   }
+ 
+   const parsed = editRequestSchema.safeParse(body)
+   if (!parsed.success) return NextResponse.json({ error: 'Invalid video edit request.' }, { status: 400 })
+ 
+-  if (requestsCaptionLanguageChange(parsed.data.instructions)) {
++  if (parsed.data.editor === 'borumi' && requestsCaptionLanguageChange(parsed.data.instructions)) {
+     return NextResponse.json({ error: captionTranslationError(parsed.data.instructions) }, { status: 422 })
+   }
+ 
+@@ -176,6 +179,7 @@ export async function POST(request: Request) {
+       throw new Error('That B-roll is no longer part of this project.')
+     }
+     const job = await createBorumiEditJob(access.userId, {
++      editor: parsed.data.editor,
+       version: 2,
+       requestedBy: 'ai-editor',
+       projectId: previousEdit?.projectId ?? parsed.data.projectId ?? crypto.randomUUID(),
+diff --git a/components/dashboard/AiStudioShell.module.css b/components/dashboard/AiStudioShell.module.css
+index e7df9c3f..c0ec200e 100644
+--- a/components/dashboard/AiStudioShell.module.css
++++ b/components/dashboard/AiStudioShell.module.css
+@@ -3498,6 +3498,36 @@
+   box-shadow: none !important;
+ }
+ 
++@media (max-width: 639px) {
++  .root .contentFrame :global([data-ai-editor-connection]) {
++    display: grid;
++    grid-template-columns: 0.5rem minmax(0, 1fr) 2.75rem;
++    column-gap: 0.5rem;
++    row-gap: 0;
++  }
++  .root .contentFrame :global([data-ai-editor-connection] > :first-child) {
++    grid-column: 1;
++    grid-row: 1 / 3;
++  }
++  .root .contentFrame :global([data-ai-editor-connection] > label) {
++    grid-column: 2;
++    grid-row: 1;
++  }
++  .root .contentFrame :global([data-ai-editor-connection] select) {
++    width: 100%;
++    min-width: 0;
++  }
++  .root .contentFrame :global([data-ai-editor-connection-status]) {
++    grid-column: 2;
++    grid-row: 2;
++    padding: 0.125rem 0.5rem 0.375rem;
++  }
++  .root .contentFrame :global([data-ai-editor-connection] > button) {
++    grid-column: 3;
++    grid-row: 1 / 3;
++  }
++}
++
+ @media (max-width: 1023px) {
+   .root .contentFrame :global([data-ai-editor-header-action="ai-edit"]) {
+     width: auto !important;
+diff --git a/components/video-editor/VideoEditorStudio.tsx b/components/video-editor/VideoEditorStudio.tsx
+index 9c24434e..c2833f94 100644
+--- a/components/video-editor/VideoEditorStudio.tsx
++++ b/components/video-editor/VideoEditorStudio.tsx
+@@ -40,6 +40,7 @@ import {
+ import { useLocale } from '@/components/i18n/LanguageTransitionProvider'
+ import controlStyles from './VideoEditorControls.module.css'
+ import { formatBorumiFileSize, type PublicBorumiEditResult } from '@/lib/borumi-edit-result'
++import { videoEditProviderLabel, type VideoEditProvider } from '@/lib/video-edit-provider'
+ import { getEditorStrings } from './editor-i18n'
+ import { EditorEngine, loadAudioDuration, loadVideoMetadata } from './editor-engine'
+ import { exportProject, pickExportMime, type ExportHandle } from './editor-export'
+@@ -90,6 +91,7 @@ type ExportState =
+   | { phase: 'error'; message: string }
+ 
+ type BorumiJob = {
++  editor?: VideoEditProvider
+   id: string
+   operation: string
+   status: 'QUEUED' | 'RUNNING' | 'COMPLETED' | 'FAILED' | 'CANCELLED'
+@@ -110,6 +112,7 @@ type BorumiJob = {
+ }
+ 
+ type EditedVideoLibraryItem = {
++  editor?: VideoEditProvider
+   id: string
+   title: string
+   status: 'QUEUED' | 'RUNNING' | 'COMPLETED'
+@@ -138,6 +141,7 @@ type EditedVideoProjectGroup = {
+ }
+ 
+ type EditableVideoRevision = {
++  editor?: VideoEditProvider
+   id: string
+   status: 'COMPLETED'
+   result: PublicBorumiEditResult
+@@ -212,6 +216,7 @@ export function VideoEditorStudio({ userId, embedded = false }: { userId: string
+   const [claudePlan, setClaudePlan] = useState('')
+   const [claudeLoading, setClaudeLoading] = useState(false)
+   const [borumiJobs, setBorumiJobs] = useState<BorumiJob[]>([])
++  const [editProvider, setEditProvider] = useState<VideoEditProvider>('borumi')
+   const [editedVideoLibraryOpen, setEditedVideoLibraryOpen] = useState(false)
+   const [editedVideoLibrary, setEditedVideoLibrary] = useState<EditedVideoLibraryItem[]>([])
+   const [editedVideoLibraryLoading, setEditedVideoLibraryLoading] = useState(false)
+@@ -566,7 +571,10 @@ export function VideoEditorStudio({ userId, embedded = false }: { userId: string
+   const testBorumiConnection = useCallback(async () => {
+     setBorumiLoading(true)
+     try {
+-      const response = await fetch('/api/ai-editor/video-jobs', { method: 'POST' })
++      const response = await fetch('/api/ai-editor/video-jobs', {
++        method: 'POST', headers: { 'content-type': 'application/json' },
++        body: JSON.stringify({ kind: 'connection', editor: editProvider }),
++      })
+       const data = await response.json().catch(() => null) as { job?: BorumiJob; error?: string } | null
+       if (!response.ok || !data?.job) throw new Error(data?.error || 'Could not queue the connection test.')
+       setBorumiJobs((current) => [data.job!, ...current.filter((job) => job.id !== data.job!.id)])
+@@ -575,7 +583,7 @@ export function VideoEditorStudio({ userId, embedded = false }: { userId: string
+     } finally {
+       setBorumiLoading(false)
+     }
+-  }, [showToast])
++  }, [editProvider, showToast])
+ 
+   const cancelBorumiEdit = useCallback(async (jobId: string) => {
+     if (cancellingBorumiJobId) return
+@@ -1007,6 +1015,7 @@ export function VideoEditorStudio({ userId, embedded = false }: { userId: string
+         headers: { 'content-type': 'application/json' },
+         body: JSON.stringify({
+           kind: 'edit',
++          editor: editProvider,
+           projectId,
+           projectName: projectName.trim() || s.untitledProject,
+           targetBrollIndex: selectedRevisionBrollIndex,
+@@ -1055,7 +1064,7 @@ export function VideoEditorStudio({ userId, embedded = false }: { userId: string
+       setBorumiLoading(false)
+       setBorumiSubmitStage(null)
+     }
+-  }, [borumiCaptionStyleReference, borumiInstructions, borumiMainFile, project.audios, project.clips, project.overlays, projectId, projectName, s.untitledProject, selectedAudioId, selectedEditedVideoJobId, selectedMainVideoId, selectedRevisionBrollIndex, showToast, uploadToCloud])
++  }, [editProvider, borumiCaptionStyleReference, borumiInstructions, borumiMainFile, project.audios, project.clips, project.overlays, projectId, projectName, s.untitledProject, selectedAudioId, selectedEditedVideoJobId, selectedMainVideoId, selectedRevisionBrollIndex, showToast, uploadToCloud])
+ 
+   const refineBorumiPrompt = useCallback(async () => {
+     const prompt = borumiInstructions.trim()
+@@ -1231,6 +1240,7 @@ export function VideoEditorStudio({ userId, embedded = false }: { userId: string
+       setSelectedMainVideoId(null)
+       setSelectedEditedVideoJobId(video.id)
+       setRevisionSource(video)
++      setEditProvider(video.editor ?? 'borumi')
+       setSelectedRevisionBrollIndex(null)
+       setBorumiMainFile(null)
+       setBorumiBrollFiles([])
+@@ -2144,7 +2154,7 @@ export function VideoEditorStudio({ userId, embedded = false }: { userId: string
+     </article>
+   }
+   const latestBorumiJob = borumiJobs.find((job) => job.operation === 'EDIT_VIDEO') ?? null
+-  const latestConnectionJob = borumiJobs.find((job) => job.operation === 'LIST_PROJECTS') ?? null
++  const latestConnectionJob = borumiJobs.find((job) => job.operation === 'LIST_PROJECTS' && (job.editor ?? 'borumi') === editProvider) ?? null
+   const completedBorumiResult = latestBorumiJob?.status === 'COMPLETED' ? latestBorumiJob.result : null
+   const latestEditableRevision: EditableVideoRevision | null = latestBorumiJob?.status === 'COMPLETED'
+     && completedBorumiResult
+@@ -2153,6 +2163,7 @@ export function VideoEditorStudio({ userId, embedded = false }: { userId: string
+     && latestBorumiJob.revision
+     ? {
+         id: latestBorumiJob.id,
++        editor: latestBorumiJob.editor,
+         status: 'COMPLETED',
+         result: completedBorumiResult,
+         projectId: latestBorumiJob.projectId,
+@@ -2176,7 +2187,7 @@ export function VideoEditorStudio({ userId, embedded = false }: { userId: string
+   const borumiReady = Boolean(selectedAvatarVideo || selectedEditedVideoJobId || borumiMainFile) && borumiInstructions.trim().length >= 5
+   const editorOffline = latestConnectionJob?.status === 'FAILED' || latestConnectionJob?.status === 'CANCELLED'
+   const connectionChecking = latestConnectionJob?.status === 'QUEUED' || latestConnectionJob?.status === 'RUNNING'
+-  const editorConnected = !editorOffline && (latestConnectionJob?.status === 'COMPLETED' || latestBorumiJob?.status === 'RUNNING' || latestBorumiJob?.status === 'COMPLETED')
++  const editorConnected = !editorOffline && (latestConnectionJob?.status === 'COMPLETED' || ((latestBorumiJob?.editor ?? 'borumi') === editProvider && (latestBorumiJob?.status === 'RUNNING' || latestBorumiJob?.status === 'COMPLETED')))
+   const connectionLabel = connectionChecking ? 'Checking' : editorOffline ? 'Offline' : editorConnected ? 'Connected' : 'Ready'
+ 
+   useEffect(() => {
+@@ -2259,7 +2270,14 @@ export function VideoEditorStudio({ userId, embedded = false }: { userId: string
+         )}
+         <div data-ai-editor-connection className={`flex min-h-12 items-center gap-2 rounded-xl border py-1 pl-3 pr-1 text-[9px] font-bold uppercase tracking-[0.12em] ${editorOffline ? 'border-red-300/25 bg-red-300/[0.06] text-red-200' : editorConnected ? 'border-emerald-300/25 bg-emerald-300/[0.06] text-emerald-200' : 'border-[#c9a869]/25 bg-black/20 text-[#b8c5d4]'}`} aria-live="polite">
+           {connectionChecking ? <Loader2 data-ai-studio-progress-spinner className="h-3.5 w-3.5 animate-spin text-[#e4c98c]" /> : <span className={`h-2 w-2 rounded-full ${editorOffline ? 'bg-red-400' : editorConnected ? 'bg-emerald-400' : 'bg-[#c9a869]'}`} />}
+-          <span>{connectionLabel}</span>
++          <label className="min-w-0" htmlFor="ai-edit-provider">
++            <span className="sr-only">Video editor</span>
++            <select id="ai-edit-provider" value={editProvider} onChange={(event) => setEditProvider(event.target.value as VideoEditProvider)} disabled={borumiSubmitting || aiEditRunning} className="min-h-11 max-w-full rounded-lg border border-[#c9a869]/25 bg-[#090d12] px-2 text-xs font-semibold normal-case tracking-normal text-[#e4c98c] focus:outline-none focus:ring-2 focus:ring-[#c9a869] disabled:opacity-50">
++              <option value="borumi">Borumi</option>
++              <option value="hyperframes">HyperFrames</option>
++            </select>
++          </label>
++          <span data-ai-editor-connection-status>{connectionLabel}</span>
+           <button type="button" onClick={() => void testBorumiConnection()} disabled={connectionChecking || borumiLoading || aiEditRunning} className="grid h-11 w-11 place-items-center rounded-full text-current transition hover:bg-white/[0.06] disabled:cursor-not-allowed disabled:opacity-40" aria-label="Check editor connection" title="Check connection">
+             <RefreshCw className="h-3.5 w-3.5" />
+           </button>
+@@ -3319,7 +3337,9 @@ export function VideoEditorStudio({ userId, embedded = false }: { userId: string
+                   </span>
+                 </div>
+                 <textarea ref={aiEditPromptRef} id="ai-edit-modal-prompt" value={borumiInstructions} onChange={(event) => setBorumiInstructions(event.target.value)} disabled={borumiPromptRefining} maxLength={5000} rows={5} placeholder={selectedRevisionBrollIndex ? `Explain what is wrong with B-roll ${selectedRevisionBrollIndex} and where it should appear instead…` : revisionSource ? 'Describe what should change in this revision…' : 'Example: Add clean captions, place B-rolls at topic changes, tighten pauses, normalize audio, and export 9:16…'} className="mt-2 min-h-36 w-full resize-y rounded-xl border border-white/10 bg-black/30 p-3 text-sm leading-6 text-[#eef2f8] outline-none placeholder:text-[#66798d] focus:border-[#e4c98c]/60 focus:ring-2 focus:ring-[#e4c98c]/10 disabled:cursor-wait disabled:opacity-65" />
+-                {revisionSource ? <p className="mt-2 text-[10px] leading-4 text-[#8294a8]">Supported revision actions: mute the whole output, or move a selected B-roll to a time, the start, middle, or end. Caption translation is not available yet and will be rejected instead of creating an unchanged video.</p> : null}
++                <p className="mt-2 text-[10px] leading-4 text-[#8294a8]">
++                  {editProvider === 'hyperframes' ? 'HyperFrames · GPT-6 Astra · Low reasoning. Edit cuts, B-roll timing, captions and caption language, titles, framing, and audio levels.' : revisionSource ? 'Supported revision actions: mute the whole output, or move a selected B-roll to a time, the start, middle, or end. Caption translation is not available yet and will be rejected instead of creating an unchanged video.' : `Editing with ${videoEditProviderLabel(editProvider)}.`}
++                </p>
+               </div>
+             </div>
+ 
+diff --git a/lib/ai-video-edit-jobs.ts b/lib/ai-video-edit-jobs.ts
+index d8ba2eb5..36b99fca 100644
+--- a/lib/ai-video-edit-jobs.ts
++++ b/lib/ai-video-edit-jobs.ts
+@@ -9,6 +9,7 @@ import {
+   type PublicBorumiEditResult,
+ } from '@/lib/borumi-edit-result'
+ import { numberedBrolls, readAiVideoEditProject } from '@/lib/ai-video-edit-project'
++import { videoEditProvider, type VideoEditProvider } from '@/lib/video-edit-provider'
+ 
+ export const BORUMI_CONNECTION_OPERATION = 'LIST_PROJECTS'
+ export const BORUMI_EDIT_OPERATION = 'EDIT_VIDEO'
+@@ -16,6 +17,7 @@ export const BORUMI_EDIT_TIMEOUT_MS = 10 * 60 * 1000
+ export const BORUMI_EDIT_TIMEOUT_ERROR = 'The AI edit exceeded the 10-minute processing limit.'
+ 
+ export type BorumiEditJobPayload = {
++  editor?: VideoEditProvider
+   version: 2
+   requestedBy: 'ai-editor'
+   projectId: string
+@@ -54,6 +56,7 @@ export type BorumiEditJobPayload = {
+ }
+ 
+ export type PublicVideoEditJob = {
++  editor: VideoEditProvider
+   id: string
+   operation: string
+   status: AiVideoEditJobStatus
+@@ -82,6 +85,7 @@ export type PublicCompletedVideoEdit = {
+ }
+ 
+ export type PublicVideoEditLibraryItem = {
++  editor: VideoEditProvider
+   id: string
+   title: string
+   status: 'QUEUED' | 'RUNNING' | 'COMPLETED'
+@@ -136,6 +140,7 @@ function publicJob(job: {
+   return {
+     id: job.id,
+     operation: job.operation,
++    editor: videoEditProvider(job.payload),
+     status: job.status,
+     result: parsePublicBorumiEditResult(job.result, {
+       supabaseUrl: process.env.NEXT_PUBLIC_SUPABASE_URL,
+@@ -175,11 +180,12 @@ const publicSelect = {
+   payload: true,
+ } satisfies Prisma.AiVideoEditJobSelect
+ 
+-export async function createBorumiConnectionJob(userId: string): Promise<PublicVideoEditJob> {
++export async function createBorumiConnectionJob(userId: string, editor: VideoEditProvider = 'borumi'): Promise<PublicVideoEditJob> {
+   const existing = await prisma.aiVideoEditJob.findFirst({
+     where: {
+       userId,
+       operation: BORUMI_CONNECTION_OPERATION,
++      payload: { path: ['editor'], equals: editor },
+       status: { in: [AiVideoEditJobStatus.QUEUED, AiVideoEditJobStatus.RUNNING] },
+     },
+     orderBy: { createdAt: 'desc' },
+@@ -191,7 +197,7 @@ export async function createBorumiConnectionJob(userId: string): Promise<PublicV
+     data: {
+       userId,
+       operation: BORUMI_CONNECTION_OPERATION,
+-      payload: { requestedBy: 'ai-editor', version: 1 },
++      payload: { requestedBy: 'ai-editor', version: 1, editor },
+     },
+     select: publicSelect,
+   })
+@@ -349,6 +355,7 @@ export async function listVideoEditLibrary(userId: string): Promise<PublicVideoE
+       progressPercent: job.progressPercent,
+       progressUpdatedAt: job.progressUpdatedAt?.toISOString() ?? null,
+       projectId: project.projectId,
++      editor: videoEditProvider(job.payload),
+       projectTitle: project.projectName,
+       revision: project.revision,
+       parentJobId: project.parentJobId,
+diff --git a/lib/video-edit-provider.ts b/lib/video-edit-provider.ts
+new file mode 100644
+index 00000000..a9616f14
+--- /dev/null
++++ b/lib/video-edit-provider.ts
+@@ -0,0 +1,10 @@
++export type VideoEditProvider = 'borumi' | 'hyperframes'
++
++export function videoEditProvider(payload: unknown): VideoEditProvider {
++  return payload && typeof payload === 'object' && 'editor' in payload && payload.editor === 'hyperframes'
++    ? 'hyperframes' : 'borumi'
++}
++
++export function videoEditProviderLabel(editor: VideoEditProvider) {
++  return editor === 'hyperframes' ? 'HyperFrames' : 'Borumi'
++}
+diff --git a/prisma/migrations/20260912150000_add_hyperframes_worker/migration.sql b/prisma/migrations/20260912150000_add_hyperframes_worker/migration.sql
+new file mode 100644
+index 00000000..4992aafd
+--- /dev/null
++++ b/prisma/migrations/20260912150000_add_hyperframes_worker/migration.sql
+@@ -0,0 +1,119 @@
++-- Keep historical jobs on Borumi; each worker can claim only its own provider.
++CREATE OR REPLACE FUNCTION public.claim_borumi_video_edit_job(
++  p_worker_id TEXT,
++  p_lease_seconds INTEGER DEFAULT 120
++)
++RETURNS TABLE (
++  job_id TEXT,
++  user_id TEXT,
++  user_email TEXT,
++  operation TEXT,
++  payload JSONB,
++  attempts INTEGER
++)
++LANGUAGE plpgsql
++SECURITY DEFINER
++SET search_path = public
++AS $$
++BEGIN
++  RETURN QUERY
++  WITH candidate AS (
++    SELECT j."id"
++    FROM "AiVideoEditJob" j
++    WHERE
++      (j."status" = 'QUEUED'
++      OR (j."status" = 'RUNNING' AND j."leaseExpiresAt" < NOW()))
++      AND COALESCE(j."payload"->>'editor', 'borumi') = 'borumi'
++      AND j."operation" IN ('EDIT_VIDEO', 'LIST_PROJECTS')
++    ORDER BY j."createdAt" ASC
++    FOR UPDATE SKIP LOCKED
++    LIMIT 1
++  ), updated AS (
++    UPDATE "AiVideoEditJob" j
++    SET
++      "status" = 'RUNNING',
++      "workerId" = p_worker_id,
++      "attempts" = j."attempts" + 1,
++      "progressStage" = 'claimed',
++      "progressMessage" = 'Worker claimed the request',
++      "progressPercent" = 1,
++      "progressUpdatedAt" = NOW(),
++      "claimedAt" = NOW(),
++      "leaseExpiresAt" = NOW() + make_interval(secs => GREATEST(30, LEAST(p_lease_seconds, 900))),
++      "startedAt" = COALESCE(j."startedAt", NOW()),
++      "updatedAt" = NOW()
++    FROM candidate
++    WHERE j."id" = candidate."id"
++    RETURNING j."id", j."userId", j."operation", j."payload", j."attempts"
++  )
++  SELECT updated."id", updated."userId", users."email", updated."operation", updated."payload", updated."attempts"
++  FROM updated
++  JOIN "User" users ON users."id" = updated."userId";
++END;
++$$;
++
++CREATE OR REPLACE FUNCTION public.claim_hyperframes_video_edit_job(
++  p_worker_id TEXT,
++  p_lease_seconds INTEGER DEFAULT 120
++)
++RETURNS TABLE (
++  job_id TEXT,
++  user_id TEXT,
++  user_email TEXT,
++  operation TEXT,
++  payload JSONB,
++  attempts INTEGER
++)
++LANGUAGE plpgsql
++SECURITY DEFINER
++SET search_path = public
++AS $$
++BEGIN
++  RETURN QUERY
++  WITH candidate AS (
++    SELECT j."id"
++    FROM "AiVideoEditJob" j
++    WHERE
++      (j."status" = 'QUEUED'
++      OR (j."status" = 'RUNNING' AND j."leaseExpiresAt" < NOW()))
++      AND COALESCE(j."payload"->>'editor', 'borumi') = 'hyperframes'
++      AND j."operation" IN ('EDIT_VIDEO', 'LIST_PROJECTS')
++    ORDER BY j."createdAt" ASC
++    FOR UPDATE SKIP LOCKED
++    LIMIT 1
++  ), updated AS (
++    UPDATE "AiVideoEditJob" j
++    SET
++      "status" = 'RUNNING',
++      "workerId" = p_worker_id,
++      "attempts" = j."attempts" + 1,
++      "progressStage" = 'claimed',
++      "progressMessage" = 'Worker claimed the request',
++      "progressPercent" = 1,
++      "progressUpdatedAt" = NOW(),
++      "claimedAt" = NOW(),
++      "leaseExpiresAt" = NOW() + make_interval(secs => GREATEST(30, LEAST(p_lease_seconds, 900))),
++      "startedAt" = COALESCE(j."startedAt", NOW()),
++      "updatedAt" = NOW()
++    FROM candidate
++    WHERE j."id" = candidate."id"
++    RETURNING j."id", j."userId", j."operation", j."payload", j."attempts"
++  )
++  SELECT updated."id", updated."userId", users."email", updated."operation", updated."payload", updated."attempts"
++  FROM updated
++  JOIN "User" users ON users."id" = updated."userId";
++END;
++$$;
++
++REVOKE ALL ON FUNCTION public.claim_borumi_video_edit_job(TEXT, INTEGER) FROM PUBLIC;
++DO $$ BEGIN
++ IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'anon') THEN REVOKE ALL ON FUNCTION public.claim_borumi_video_edit_job(TEXT, INTEGER) FROM anon; END IF;
++ IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'authenticated') THEN REVOKE ALL ON FUNCTION public.claim_borumi_video_edit_job(TEXT, INTEGER) FROM authenticated; END IF;
++ IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'service_role') THEN GRANT EXECUTE ON FUNCTION public.claim_borumi_video_edit_job(TEXT, INTEGER) TO service_role; END IF;
++END $$;
++REVOKE ALL ON FUNCTION public.claim_hyperframes_video_edit_job(TEXT, INTEGER) FROM PUBLIC;
++DO $$ BEGIN
++ IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'anon') THEN REVOKE ALL ON FUNCTION public.claim_hyperframes_video_edit_job(TEXT, INTEGER) FROM anon; END IF;
++ IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'authenticated') THEN REVOKE ALL ON FUNCTION public.claim_hyperframes_video_edit_job(TEXT, INTEGER) FROM authenticated; END IF;
++ IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'service_role') THEN GRANT EXECUTE ON FUNCTION public.claim_hyperframes_video_edit_job(TEXT, INTEGER) TO service_role; END IF;
++END $$;

@@ -1,0 +1,166 @@
+import path from 'node:path'
+import { pathToFileURL } from 'node:url'
+import { createRequire } from 'node:module'
+import { mkdir, writeFile, readFile, copyFile, stat } from 'node:fs/promises'
+import { config, hyperframes, run, probe, ffmpeg } from './runtime.mjs'
+import { downloadMedia, thumbnail, transcribe } from './media.mjs'
+import { requestPlan, validatePlan } from './plan.mjs'
+import { buildComposition } from './composition.mjs'
+import { verifyCodexLogin } from './codex.mjs'
+
+const require = createRequire(import.meta.url)
+const TIMEOUT_MS = 10 * 60 * 1000
+
+export async function rpc(cfg, name, body, signal) {
+  const response = await fetch(`${cfg.supabaseUrl}/rest/v1/rpc/${name}`, {
+    method: 'POST', headers: { apikey: cfg.serviceRoleKey, Authorization: `Bearer ${cfg.serviceRoleKey}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify(body), signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(15000)]) : AbortSignal.timeout(15000),
+  })
+  if (!response.ok) throw new Error(`Worker queue request failed (${response.status}). Verify the HyperFrames database migration and Supabase key.`)
+  return response.json()
+}
+
+async function previousPlan(job, cfg, signal) {
+  const id = job.payload.parentJobId
+  if (!id) return null
+  const url = new URL(`${cfg.supabaseUrl}/rest/v1/AiVideoEditJob`)
+  url.search = new URLSearchParams({ id: `eq.${id}`, userId: `eq.${job.user_id}`, status: 'eq.COMPLETED', select: 'payload,result', limit: '1' })
+  const response = await fetch(url, { headers: { apikey: cfg.serviceRoleKey, Authorization: `Bearer ${cfg.serviceRoleKey}` }, signal })
+  if (!response.ok) throw new Error('The previous edit could not be loaded.')
+  const previous = (await response.json())[0]
+  if (!previous) throw new Error('The previous edit is no longer available.')
+  return previous.result?.editPlan || { previousInstructions: previous.payload?.instructions || '' }
+}
+
+export async function renderPlan(projectDir, plan, media, signal) {
+  const assets = path.join(projectDir, 'assets')
+  await copyFile(require.resolve('gsap/dist/gsap.min.js'), path.join(assets, 'gsap.min.js'))
+  if (media.music && !plan.muteOutput && plan.musicVolume > 0) {
+    await run(ffmpeg, ['-y', '-stream_loop', '-1', '-i', path.join(assets, 'music.mp3'), '-t', String(plan.duration), '-af', `afade=t=in:d=0.7,afade=t=out:st=${Math.max(0,plan.duration-1)}:d=1`, '-c:a', 'aac', path.join(assets, 'music-loop.m4a')], { signal })
+  }
+  await writeFile(path.join(projectDir, 'index.html'), buildComposition(plan, { mainHasAudio: media.main.hasAudio, hasMusic: Boolean(media.music) }))
+  await writeFile(path.join(projectDir, 'edit-plan.json'), JSON.stringify(plan, null, 2))
+  await hyperframes(['lint'], { cwd: projectDir, signal })
+  const output = path.join(projectDir, 'master.mp4')
+  await hyperframes(['render', '--output', output, '--fps', '30', '--quality', 'high', '--workers', '1'], { cwd: projectDir, signal })
+  const details = await probe(output, signal)
+  if (!details.hasVideo || Math.abs(details.duration - plan.duration) > 0.5) throw new Error('HyperFrames rendered an unexpected video duration.')
+  const video = details.streams.find((stream) => stream.codec_type === 'video')
+  if (video.width !== 1080 || video.height !== 1920) throw new Error('HyperFrames did not render the required 1080 × 1920 canvas.')
+  if (!plan.muteOutput && (media.main.hasAudio || (media.music && plan.musicVolume > 0)) && !details.hasAudio) throw new Error('The rendered video is missing its expected audio.')
+  const web = path.join(projectDir, 'edit.mp4')
+  const bitrate = Math.max(200, Math.floor(32 * 1024 * 1024 * 8 / plan.duration / 1000) - 128)
+  await run(ffmpeg, ['-y', '-i', output, '-map', '0:v:0', ...(plan.muteOutput ? ['-an'] : ['-map', '0:a?', '-c:a', 'aac', '-b:a', '128k']), '-c:v', 'libx264', '-preset', 'veryfast', '-b:v', `${bitrate}k`, '-maxrate', `${bitrate}k`, '-bufsize', `${bitrate*2}k`, '-pix_fmt', 'yuv420p', '-movflags', '+faststart', web], { signal })
+  if ((await stat(web)).size > 45 * 1024 * 1024) throw new Error('The edited video exceeds the website upload limit.')
+  return web
+}
+
+async function editVideo(job, cfg, signal, progress) {
+  const payload = job.payload
+  if (payload?.editor !== 'hyperframes' || payload.version !== 2 || !payload.mainVideo || !Array.isArray(payload.brollVideos) || payload.brollVideos.length > 20) throw new Error('Unsupported HyperFrames job payload.')
+  if (!/^[a-zA-Z0-9_-]+$/.test(job.job_id)) throw new Error('Invalid job identifier.')
+  const projectDir = path.join(cfg.projectsDir, `${job.job_id}-${job.attempts}`)
+  const assets = path.join(projectDir, 'assets')
+  await mkdir(assets, { recursive: true })
+  await progress('download', 'Downloading the selected video and B-rolls', 5)
+  const mainFile = await downloadMedia(payload.mainVideo.url, path.join(assets, 'main.mp4'), cfg, signal)
+  const main = await probe(mainFile, signal)
+  if (!main.hasVideo || main.duration > 600) throw new Error('HyperFrames needs a main video no longer than 10 minutes.')
+  const brolls = []
+  const images = []
+  for (const [index, source] of payload.brollVideos.entries()) {
+    const file = await downloadMedia(source.url, path.join(assets, `broll-${index+1}.mp4`), cfg, signal)
+    const meta = await probe(file, signal)
+    if (!meta.hasVideo) throw new Error(`B-roll ${index+1} has no video stream.`)
+    brolls.push({ duration: meta.duration, title: source.title })
+    images.push({ label: `B-roll ${index+1}: ${source.title}`, url: await thumbnail(file, Math.min(1,meta.duration/2), path.join(assets, `broll-${index+1}.jpg`), signal) })
+  }
+  let music = null
+  if (payload.musicTrack) {
+    const file = await downloadMedia(payload.musicTrack.url, path.join(assets, 'music.mp3'), cfg, signal)
+    music = await probe(file, signal)
+    if (!music.hasAudio) throw new Error('The selected music has no audio stream.')
+  }
+  for (const [index, fraction] of [0.1,0.5,0.9].entries()) images.push({ label: `Main video at ${(main.duration*fraction).toFixed(1)} seconds`, url: await thumbnail(mainFile, main.duration*fraction, path.join(assets, `main-${index}.jpg`), signal) })
+  if (payload.captionStyleReference) {
+    const file = await downloadMedia(payload.captionStyleReference.url, path.join(assets, 'caption-reference'), cfg, signal, 10 * 1024 * 1024)
+    images.push({ label: 'Requested caption style reference', url: await thumbnail(file, 0, path.join(assets, 'caption-reference.jpg'), signal) })
+  }
+  await progress('transcribe', 'Transcribing the speech for accurate caption timing', 25)
+  const transcript = main.hasAudio ? await transcribe(mainFile, cfg, signal) : { text: '', words: [] }
+  await writeFile(path.join(projectDir, 'transcript.json'), JSON.stringify(transcript))
+  await progress('astra-edit', 'GPT-6 Astra is planning the edit · Low reasoning', 40)
+  const media = { main: { duration: main.duration, hasAudio: main.hasAudio }, brolls, music: music ? { duration: music.duration } : null }
+  const plan = await requestPlan({ instructions: payload.instructions, media, transcript, previousPlan: await previousPlan(job, cfg, signal), images, projectDir }, cfg, signal)
+  if (payload.requestedActions?.muteOutput) plan.muteOutput = true
+  validatePlan(plan, media)
+  await progress('render', 'HyperFrames is rendering the edited video', 65)
+  const outputPath = await renderPlan(projectDir, plan, media, signal)
+  await progress('upload', 'Uploading the edited MP4 for playback', 92)
+  const fileName = `hyperframes-${job.job_id}.mp4`
+  const objectPath = `hyperframes-exports/${job.user_id}/${job.job_id}/${job.attempts}/${fileName}`
+  const encoded = [cfg.bucket, ...objectPath.split('/')].map(encodeURIComponent).join('/')
+  const bytes = await readFile(outputPath)
+  const response = await fetch(`${cfg.supabaseUrl}/storage/v1/object/${encoded}`, {
+    method: 'POST', headers: { apikey: cfg.serviceRoleKey, Authorization: `Bearer ${cfg.serviceRoleKey}`, 'Content-Type': 'video/mp4', 'x-upsert': 'true' }, body: bytes, signal,
+  })
+  if (!response.ok) throw new Error(`Export upload failed (${response.status}). Verify the website storage bucket and file-size limit.`)
+  await progress('finalizing', 'Finalizing the HyperFrames edit', 99)
+  const videoUrl = `${cfg.supabaseUrl}/storage/v1/object/public/${encoded}`
+  return { videoUrl, downloadUrl: `${videoUrl}?download=${encodeURIComponent(fileName)}`, fileName, sizeBytes: bytes.length, completedAt: new Date().toISOString(), editor: 'hyperframes', model: cfg.model, reasoningEffort: cfg.effort, editPlan: plan, projectDir, workerId: cfg.workerId }
+}
+
+export async function handleJob(job, cfg, outerSignal) {
+  const controller = new AbortController()
+  const signal = AbortSignal.any([controller.signal, outerSignal, AbortSignal.timeout(TIMEOUT_MS)])
+  let state = { stage: 'starting', message: 'HyperFrames worker connected', percent: 1 }
+  let failures = 0
+  const progress = async (stage, message, percent) => {
+    signal.throwIfAborted()
+    state = { stage, message, percent }
+    const accepted = await rpc(cfg, 'update_borumi_video_edit_job_progress', { p_job_id: job.job_id, p_worker_id: cfg.workerId, p_stage: stage, p_message: message, p_percent: percent }, signal)
+    if (!accepted) { controller.abort(new Error('The job was cancelled or claimed by another worker.')); signal.throwIfAborted() }
+  }
+  let heartbeatRunning = false
+  const timer = setInterval(async () => {
+    if (heartbeatRunning || signal.aborted) return
+    heartbeatRunning = true
+    try { await progress(state.stage, state.message, state.percent); failures = 0 }
+    catch (error) { if (++failures >= 3) controller.abort(error) }
+    finally { heartbeatRunning = false }
+  }, 3000)
+  try {
+    await progress(state.stage, state.message, state.percent)
+    let result
+    if (job.operation === 'LIST_PROJECTS') {
+      await verifyCodexLogin(cfg, signal)
+      await hyperframes(['--version'], { signal })
+      result = { editor: 'hyperframes', model: cfg.model, reasoningEffort: cfg.effort, authentication: 'chatgpt', modelAccessVerified: false, workerId: cfg.workerId, connectedAt: new Date().toISOString() }
+    } else if (job.operation === 'EDIT_VIDEO') result = await editVideo(job, cfg, signal, progress)
+    else throw new Error('Unsupported worker operation.')
+    signal.throwIfAborted()
+    return await rpc(cfg, 'finish_borumi_video_edit_job', { p_job_id: job.job_id, p_worker_id: cfg.workerId, p_result: result, p_error: null })
+  } catch (error) {
+    const message = signal.aborted ? String(signal.reason?.message || 'The edit was cancelled or reached the 10-minute processing limit.') : String(error.message || error)
+    await rpc(cfg, 'finish_borumi_video_edit_job', { p_job_id: job.job_id, p_worker_id: cfg.workerId, p_result: null, p_error: message.slice(0,2000) })
+    console.error(`[hyperframes-worker] job=${job.job_id} failed: ${message}`)
+    return false
+  } finally { clearInterval(timer) }
+}
+
+async function main() {
+  const cfg = config()
+  const controller = new AbortController()
+  for (const signal of ['SIGINT','SIGTERM']) process.on(signal, () => controller.abort(new Error('Worker stopped.')))
+  console.log(`[hyperframes-worker] ${cfg.workerId} · ${cfg.model} · ${cfg.effort}`)
+  while (!controller.signal.aborted) {
+    try {
+      const rows = await rpc(cfg, 'claim_hyperframes_video_edit_job', { p_worker_id: cfg.workerId, p_lease_seconds: 900 }, controller.signal)
+      const job = rows?.[0]
+      if (job) { console.log(`[hyperframes-worker] job=${job.job_id} ${job.operation}`); await handleJob(job, cfg, controller.signal); continue }
+    } catch (error) { if (!controller.signal.aborted) console.error(`[hyperframes-worker] ${error.message}`) }
+    await new Promise((resolve) => setTimeout(resolve, 1500))
+  }
+}
+
+if (process.argv[1] && import.meta.url === pathToFileURL(path.resolve(process.argv[1])).href) await main()
