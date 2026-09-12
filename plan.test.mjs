@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { validatePlan, plannerPrompt } from './plan.mjs'
+import { validatePlan, plannerPrompt, requestPlan } from './plan.mjs'
 import { codexArguments, codexEnvironment } from './codex.mjs'
 import { buildComposition } from './composition.mjs'
 import { allowedMediaUrl } from './media.mjs'
@@ -8,6 +8,41 @@ import { childEnvironment, config } from './runtime.mjs'
 
 const media = { main: { duration: 10 }, brolls: [{ duration: 3 }] }
 const plan = () => ({ unsupportedReason: null, summary: 'Trim and caption', segments: [{ sourceStart: 1, sourceEnd: 8, zoom: 1.1 }], brolls: [{ index: 1, start: 2, duration: 2, sourceStart: 0.5 }], captions: [{ text: 'Hello <script>alert(1)</script>', start: 0, end: 2 }], titles: [], captionColor: '#ffffff', accentColor: '#d7af58', speechVolume: 1, musicVolume: 0.1, muteOutput: false })
+test('B-roll rounding overflow is clamped to source and output bounds without mutating the input', () => {
+  const input = plan()
+  input.brolls = [{ index: 1, start: 5, sourceStart: 1, duration: 2.04 }]
+  const result = validatePlan(input, media)
+  assert.equal(result.brolls[0].duration, 2)
+  assert.equal(input.brolls[0].duration, 2.04)
+  input.brolls[0].duration = 2.1
+  assert.throws(() => validatePlan(input, media), /at most 2.000000s/)
+})
+test('invalid B-roll plan gets one correction with actual bounds, then succeeds', async () => {
+  const calls = []
+  const result = await requestPlan({ instructions: 'Add B-roll', media, projectDir: '/test' }, {}, undefined, async input => {
+    calls.push(input)
+    const value = plan()
+    if (calls.length === 1) value.brolls[0].duration = 5
+    return value
+  })
+  assert.equal(calls.length, 2)
+  assert.match(calls[1].prompt, /at most 2.500000s/)
+  assert.notEqual(calls[0].directory, calls[1].directory)
+  assert.equal(result.brolls[0].duration, 2)
+})
+test('persistent invalid plans stop after one repair, unsupported requests never retry', async () => {
+  let calls = 0
+  const context = { media, projectDir: '/test' }
+  await assert.rejects(requestPlan(context, {}, undefined, async () => {
+    calls++; const value = plan(); value.brolls[0].index = 0; return value
+  }), /1-based/)
+  assert.equal(calls, 2)
+  calls = 0
+  await assert.rejects(requestPlan(context, {}, undefined, async () => {
+    calls++; return { unsupportedReason: 'Dubbing' }
+  }), /Dubbing/)
+  assert.equal(calls, 1)
+})
 test('Astra uses ChatGPT login, Low effort and a read-only structured CLI run', () => {
   const cfg = config({ SUPABASE_URL: 'https://example.supabase.co', SUPABASE_SERVICE_ROLE_KEY: 'test' })
   assert.equal(cfg.apiKey, undefined)

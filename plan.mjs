@@ -30,10 +30,15 @@ export function validatePlan(plan, media) {
   }
   if (duration > 600) throw new Error('HyperFrames edits are limited to 10 minutes of video.')
   if (!Array.isArray(plan.brolls) || plan.brolls.length > 80) throw new Error('Invalid B-roll plan.')
-  for (const clip of plan.brolls) {
+  const brolls = plan.brolls.map((clip) => {
     const source = media.brolls[clip.index - 1]
-    if (!Number.isInteger(clip.index) || !source || !between(clip.start, 0, duration) || !between(clip.duration, 0.1, duration - clip.start + 0.05) || !between(clip.sourceStart, 0, source.duration - clip.duration + 0.05)) throw new Error('A B-roll placement is outside the available footage.')
-  }
+    if (!Number.isInteger(clip.index) || !source) throw new Error(`Invalid B-roll index ${clip.index}. Use 1-based indexes from 1 to ${media.brolls.length}.`)
+    if (!between(clip.start, 0, duration) || !between(clip.sourceStart, 0, source.duration) || !between(clip.duration, 0.1, 600)) throw new Error(`Invalid B-roll ${clip.index} timing: output start=${clip.start}, source start=${clip.sourceStart}, duration=${clip.duration}; output length=${duration}, source length=${source.duration}. All times must be seconds.`)
+    const available = Math.min(duration - clip.start, source.duration - clip.sourceStart)
+    if (available < 0.1 || clip.duration > available + 0.05 + 1e-9) throw new Error(`B-roll ${clip.index} requests ${clip.duration}s at output ${clip.start}s from source ${clip.sourceStart}s, but at most ${Math.max(0, available).toFixed(6)}s is available. Source length=${source.duration}s; output length=${duration}s. Shorten the overlay or choose an earlier valid start; never extend the source.`)
+    // Snap only sub-50ms rounding overflow to the actual available footage.
+    return { ...clip, duration: Math.min(clip.duration, available) }
+  })
   for (const key of ['captions', 'titles']) {
     if (!Array.isArray(plan[key]) || plan[key].length > (key === 'captions' ? 500 : 30)) throw new Error(`Invalid ${key}.`)
     for (const clip of plan[key]) {
@@ -42,7 +47,7 @@ export function validatePlan(plan, media) {
   }
   if (![plan.captionColor, plan.accentColor].every((color) => typeof color === 'string' && /^#[\da-f]{6}$/i.test(color))) throw new Error('Invalid caption colors.')
   if (!between(plan.musicVolume, 0, 0.3) || !between(plan.speechVolume, 0, 2) || typeof plan.muteOutput !== 'boolean') throw new Error('Invalid audio levels.')
-  return { ...plan, duration: Math.round(duration * 1000) / 1000 }
+  return { ...plan, brolls, duration: Math.round(duration * 1000) / 1000 }
 }
 
 export function plannerPrompt({ instructions, media, transcript, previousPlan, images = [] }) {
@@ -55,8 +60,17 @@ Edit request and source content:
 ${JSON.stringify({ instructions, media, transcript, previousPlan })}`
 }
 
-export async function requestPlan(context, cfg, signal) {
-  const plan = await runCodexPlan({ prompt: plannerPrompt(context), images: context.images,
-    schema: planSchema, directory: path.join(context.projectDir, 'planner') }, cfg, signal)
-  return validatePlan(plan, context.media)
+export async function requestPlan(context, cfg, signal, planner = runCodexPlan) {
+  const prompt = plannerPrompt(context)
+  let correction = ''
+  for (let attempt = 0; attempt < 2; attempt++) {
+    signal?.throwIfAborted()
+    const plan = await planner({ prompt: prompt + correction, images: context.images,
+      schema: planSchema, directory: path.join(context.projectDir, attempt ? 'planner-repair' : 'planner') }, cfg, signal)
+    try { return validatePlan(plan, context.media) }
+    catch (error) {
+      if (plan?.unsupportedReason || attempt === 1) throw error
+      correction = `\nYour previous plan failed renderer validation. Correct the timing/index errors while preserving the requested edit and all unrelated valid choices. B-roll indexes are 1-based. For each overlay: duration <= min(source duration - sourceStart, output duration - start). Never invent extra footage. Return the complete corrected JSON plan.\nValidation error: ${error.message}\nPrevious invalid plan: ${JSON.stringify(plan)}`
+    }
+  }
 }
