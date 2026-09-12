@@ -123,3 +123,6 @@ Official references:
 The terminal shows UTC timestamps, worker ID, user email and ID, job ID, operation, attempt and elapsed seconds on each job log. Stage changes appear immediately; long-running stages repeat every 30 seconds. B-roll logs include the scene number, Flow job ID and provider status. Completion is logged only after the database accepts the result. Failures and any failure to update the database are logged separately.
 
 Credentials and URLs are redacted from logs. Logs contain customer email addresses, so remove those before sharing publicly. Restart the worker after pulling updates to load the new logging code.
+# Source video size
+
+Source downloads default to 2048 MiB (2 GiB) per file, matching the website's default upload limit. Existing `.env` files inherit this default automatically. To override it, set `HYPERFRAMES_MAX_SOURCE_MB` to a whole number from 1 to 20480 and restart the worker. Downloads stream to disk; failed partial downloads are removed. Larger files still need enough local disk space and must finish within the job processing deadline. Caption-reference and other explicit asset limits remain separate.

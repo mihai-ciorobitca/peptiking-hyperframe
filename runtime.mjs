@@ -23,7 +23,10 @@ export function config(env = process.env) {
   const model = env.HYPERFRAMES_MODEL || 'gpt-6-astra'
   const effort = env.HYPERFRAMES_REASONING_EFFORT || 'low'
   if (model !== 'gpt-6-astra' || effort !== 'low') throw new Error('This worker is configured for gpt-6-astra with low reasoning effort.')
+  const maxSourceMb = Number(env.HYPERFRAMES_MAX_SOURCE_MB || 2048)
+  if (!Number.isSafeInteger(maxSourceMb) || maxSourceMb < 1 || maxSourceMb > 20480) throw new Error('HYPERFRAMES_MAX_SOURCE_MB must be a whole number between 1 and 20480 (MiB).')
   return {
+    maxSourceBytes: maxSourceMb * 1024 * 1024,
     supabaseUrl, serviceRoleKey: required('SUPABASE_SERVICE_ROLE_KEY'),
     codexHome: env.HYPERFRAMES_CODEX_HOME || env.CODEX_HOME,
     python: env.HYPERFRAMES_PYTHON || path.join(serviceDir, '.venv', process.platform === 'win32' ? 'Scripts/python.exe' : 'bin/python'),

@@ -1,6 +1,6 @@
 import path from 'node:path'
 import { createWriteStream } from 'node:fs'
-import { readFile } from 'node:fs/promises'
+import { readFile, rm } from 'node:fs/promises'
 import { Readable, Transform } from 'node:stream'
 import { pipeline } from 'node:stream/promises'
 import { ffmpeg, run, serviceDir } from './runtime.mjs'
@@ -11,7 +11,8 @@ export function allowedMediaUrl(value, hosts) {
   return url
 }
 
-export async function downloadMedia(value, file, cfg, signal, maxBytes = 500 * 1024 * 1024) {
+export async function downloadMedia(value, file, cfg, signal, maxBytes = cfg.maxSourceBytes ?? 2048 * 1024 * 1024) {
+  const sizeError = bytes => new Error(`Source file is too large (${(bytes / 1024 / 1024).toFixed(1)} MiB; limit ${(maxBytes / 1024 / 1024).toFixed(1)} MiB). ${maxBytes === (cfg.maxSourceBytes ?? 2048 * 1024 * 1024) ? 'Use a smaller video or increase HYPERFRAMES_MAX_SOURCE_MB in .env and restart the worker.' : 'Use a smaller asset.'}`)
   let url = allowedMediaUrl(value, cfg.allowedMediaHosts)
   for (let redirects = 0; redirects <= 3; redirects++) {
     const response = await fetch(url, { redirect: 'manual', signal })
@@ -23,10 +24,16 @@ export async function downloadMedia(value, file, cfg, signal, maxBytes = 500 * 1
       continue
     }
     if (!response.ok || !response.body) throw new Error(`Source media download failed (${response.status}).`)
-    if (Number(response.headers.get('content-length')) > maxBytes) { await response.body.cancel(); throw new Error('Source file is too large.') }
+    const contentLength = Number(response.headers.get('content-length'))
+    if (contentLength > maxBytes) { await response.body.cancel(); throw sizeError(contentLength) }
     let bytes = 0
-    const limit = new Transform({ transform(chunk, encoding, callback) { bytes += chunk.length; callback(bytes > maxBytes ? new Error('Source file is too large.') : null, chunk) } })
-    await pipeline(Readable.fromWeb(response.body), limit, createWriteStream(file), { signal })
+    const limit = new Transform({ transform(chunk, encoding, callback) { bytes += chunk.length; callback(bytes > maxBytes ? sizeError(bytes) : null, chunk) } })
+    try {
+      await pipeline(Readable.fromWeb(response.body), limit, createWriteStream(file), { signal })
+    } catch (error) {
+      await rm(file, { force: true }).catch(() => {})
+      throw error
+    }
     return file
   }
   throw new Error('Too many media redirects.')
