@@ -1,5 +1,6 @@
 import { setTimeout as delay } from 'node:timers/promises'
 import { writeFile } from 'node:fs/promises'
+import { createLogger } from './logging.mjs'
 
 export async function loadFlowConnection(cfg, signal, request = fetch) {
   if (cfg.flowUrl && cfg.flowKey) return cfg
@@ -44,11 +45,18 @@ export async function generateScenes(scenes, owner, cfg, signal, progress, manif
       const id = submission.jobs?.[0]?.jobId || submission.jobId
       if (typeof id !== 'string' || !id) throw new Error('B-roll service accepted a request without a job id; check B-Roll Creator before retrying.')
       pending.add(id)
+      await progress('generate-broll', `B-roll ${index + 1}/${scenes.length} flowJob=${id} status=submitted`, 33)
       records.push({ id, title: scene.title, status: 'submitted' })
       await writeFile(manifestPath, JSON.stringify(records, null, 2))
+      let lastStatus = ''
       for (;;) {
         signal.throwIfAborted()
         const job = await request(cfg, `/v1/jobs/${encodeURIComponent(id)}`, undefined, signal)
+        const status = `${job.status || 'unknown'}${Number.isFinite(job.queuePosition) ? ` queuePosition=${job.queuePosition}` : ''}`
+        if (status !== lastStatus) {
+          await progress('generate-broll', `B-roll ${index + 1}/${scenes.length} flowJob=${id} status=${status}`, 33)
+          lastStatus = status
+        }
         if (['failed','cancelled','cancelling'].includes(job.status)) throw new Error(`B-roll ${index+1} failed: ${job.error || job.status}`)
         if (job.status === 'done') {
           const library = await request(cfg, `/v1/users/${encodeURIComponent(owner.email)}/executions?limit=50`, undefined, signal)
@@ -68,7 +76,7 @@ export async function generateScenes(scenes, owner, cfg, signal, progress, manif
     // Cancel known pending generations when this edit fails or is cancelled.
     for (const id of pending) {
       try { await request(cfg, `/v1/jobs/${encodeURIComponent(id)}/cancel`, { userEmail: owner.email }, AbortSignal.timeout(10000)) }
-      catch { console.error(`Could not cancel Flow job ${id}; check B-Roll Creator.`) }
+      catch { createLogger(cfg, { ...owner.job, user_email: owner.email }).emit('flow-cancel-error', `flowJob=${id} Could not cancel; check B-Roll Creator.`) }
     }
   }
 }

@@ -10,6 +10,7 @@ import { verifyCodexLogin } from './codex.mjs'
 import { planAssets } from './asset-plan.mjs'
 import { generateScenes, loadFlowConnection } from './flow.mjs'
 import { acquireMusic } from './pixabay.mjs'
+import { createLogger, safeLogText } from './logging.mjs'
 
 const require = createRequire(import.meta.url)
 const TIMEOUT_MS = 10 * 60 * 1000
@@ -128,7 +129,7 @@ async function editVideo(job, cfg, signal, progress) {
       const response = await fetch(ownerUrl, { headers: { apikey: cfg.serviceRoleKey, Authorization: `Bearer ${cfg.serviceRoleKey}` }, signal })
       if (!response.ok) throw new Error('Could not load the B-roll generation project for this edit owner.')
       const owner = (await response.json())[0]
-      const generated = await generateScenes(assetPlan.scenes, { email: owner?.email, projectId: owner?.aiVideoFlowProjectId }, flowCfg, signal, progress, path.join(projectDir, 'flow-jobs.json'))
+      const generated = await generateScenes(assetPlan.scenes, { email: owner?.email, projectId: owner?.aiVideoFlowProjectId, job }, flowCfg, signal, progress, path.join(projectDir, 'flow-jobs.json'))
       for (const clip of generated) {
         const index = brolls.length + 1
         const file = await downloadMedia(clip.url, path.join(assets, `broll-${index}.mp4`), cfg, signal)
@@ -163,6 +164,8 @@ async function editVideo(job, cfg, signal, progress) {
 }
 
 export async function handleJob(job, cfg, outerSignal) {
+  const log = createLogger(cfg, job)
+  log.emit('claimed', `model=${cfg.model} reasoning=${cfg.effort}`)
   const controller = new AbortController()
   const signal = AbortSignal.any([controller.signal, outerSignal, AbortSignal.timeout(TIMEOUT_MS)])
   let state = { stage: 'starting', message: 'HyperFrames worker connected', percent: 1 }
@@ -172,13 +175,14 @@ export async function handleJob(job, cfg, outerSignal) {
     state = { stage, message, percent }
     const accepted = await rpc(cfg, 'update_borumi_video_edit_job_progress', { p_job_id: job.job_id, p_worker_id: cfg.workerId, p_stage: stage, p_message: message, p_percent: percent }, signal)
     if (!accepted) { controller.abort(new Error('The job was cancelled or claimed by another worker.')); signal.throwIfAborted() }
+    log.progress(stage, message, percent)
   }
   let heartbeatRunning = false
   const timer = setInterval(async () => {
     if (heartbeatRunning || signal.aborted) return
     heartbeatRunning = true
     try { await progress(state.stage, state.message, state.percent); failures = 0 }
-    catch (error) { if (++failures >= 3) controller.abort(error) }
+    catch (error) { log.emit('heartbeat-error', error.message); if (++failures >= 3) controller.abort(error) }
     finally { heartbeatRunning = false }
   }, 3000)
   try {
@@ -191,11 +195,18 @@ export async function handleJob(job, cfg, outerSignal) {
     } else if (job.operation === 'EDIT_VIDEO') result = await editVideo(job, cfg, signal, progress)
     else throw new Error('Unsupported worker operation.')
     signal.throwIfAborted()
-    return await rpc(cfg, 'finish_borumi_video_edit_job', { p_job_id: job.job_id, p_worker_id: cfg.workerId, p_result: result, p_error: null })
+    clearInterval(timer)
+    const accepted = await rpc(cfg, 'finish_borumi_video_edit_job', { p_job_id: job.job_id, p_worker_id: cfg.workerId, p_result: result, p_error: null })
+    log.emit(accepted ? 'completed' : 'completion-rejected', accepted ? `progress=100% bytes=${result.sizeBytes || 0}` : 'Result was not accepted; check cancellation or lease ownership.')
+    return accepted
   } catch (error) {
     const message = signal.aborted ? String(signal.reason?.message || 'The edit was cancelled or reached the 10-minute processing limit.') : String(error.message || error)
-    await rpc(cfg, 'finish_borumi_video_edit_job', { p_job_id: job.job_id, p_worker_id: cfg.workerId, p_result: null, p_error: message.slice(0,2000) })
-    console.error(`[hyperframes-worker] job=${job.job_id} failed: ${message}`)
+    clearInterval(timer)
+    log.emit(signal.aborted ? 'aborted' : 'failed', `stage=${state.stage} ${message}`)
+    try {
+      const accepted = await rpc(cfg, 'finish_borumi_video_edit_job', { p_job_id: job.job_id, p_worker_id: cfg.workerId, p_result: null, p_error: safeLogText(message, [cfg.serviceRoleKey, cfg.flowKey]) })
+      log.emit(accepted ? 'failure-recorded' : 'failure-update-rejected', 'Database failure update')
+    } catch (finishError) { log.emit('failure-update-error', finishError.message) }
     return false
   } finally { clearInterval(timer) }
 }
@@ -204,15 +215,17 @@ async function main() {
   const cfg = config()
   const controller = new AbortController()
   for (const signal of ['SIGINT','SIGTERM']) process.on(signal, () => controller.abort(new Error('Worker stopped.')))
-  console.log(`[hyperframes-worker] ${cfg.workerId} · ${cfg.model} · ${cfg.effort}`)
+  const log = createLogger(cfg)
+  log.emit('ready', `model=${cfg.model} reasoning=${cfg.effort} Waiting for jobs`)
   while (!controller.signal.aborted) {
     try {
       const rows = await rpc(cfg, 'claim_hyperframes_video_edit_job', { p_worker_id: cfg.workerId, p_lease_seconds: 900 }, controller.signal)
       const job = rows?.[0]
-      if (job) { console.log(`[hyperframes-worker] job=${job.job_id} ${job.operation}`); await handleJob(job, cfg, controller.signal); continue }
-    } catch (error) { if (!controller.signal.aborted) console.error(`[hyperframes-worker] ${error.message}`) }
+      if (job) { await handleJob(job, cfg, controller.signal); continue }
+    } catch (error) { if (!controller.signal.aborted) log.emit('queue-error', error.message) }
     await new Promise((resolve) => setTimeout(resolve, 1500))
   }
+  log.emit('stopped', 'Worker stopped')
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(path.resolve(process.argv[1])).href) await main()

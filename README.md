@@ -118,3 +118,8 @@ Official references:
 - [ChatGPT sign-in](https://learn.chatgpt.com/docs/auth)
 - [HyperFrames CLI](https://hyperframes.app/docs/5-packages/cli)
 - [Local transcription](https://github.com/SYSTRAN/faster-whisper)
+# Worker logs
+
+The terminal shows UTC timestamps, worker ID, user email and ID, job ID, operation, attempt and elapsed seconds on each job log. Stage changes appear immediately; long-running stages repeat every 30 seconds. B-roll logs include the scene number, Flow job ID and provider status. Completion is logged only after the database accepts the result. Failures and any failure to update the database are logged separately.
+
+Credentials and URLs are redacted from logs. Logs contain customer email addresses, so remove those before sharing publicly. Restart the worker after pulling updates to load the new logging code.
