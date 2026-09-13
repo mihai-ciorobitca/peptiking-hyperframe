@@ -1,4 +1,5 @@
-import { config, hyperframes, run, ffmpeg, ffprobePath } from './runtime.mjs'
+import path from 'node:path'
+import { config, hyperframes, run, ffmpeg, ffprobePath, serviceDir } from './runtime.mjs'
 import { verifyCodexLogin } from './codex.mjs'
 import { loadFlowConnection } from './flow.mjs'
 
@@ -16,6 +17,7 @@ await check('Worker configuration', async () => { cfg = config() })
 if (cfg) {
   if (cfg.autoAssets) await check('Automatic B-roll connection', () => loadFlowConnection(cfg, AbortSignal.timeout(15000)))
   await check('Codex ChatGPT login (no API key)', () => verifyCodexLogin(cfg, AbortSignal.timeout(15000)))
+  await check('Local face tracking', () => run(cfg.python, ['-c', 'import cv2,sys; cv2.FaceDetectorYN.create(sys.argv[1], "", (640,640)); print("ready")', path.join(serviceDir, 'face_detection_yunet_2023mar.onnx')]))
   await check('Local speech transcription', () => run(cfg.python, ['-c', 'from faster_whisper import WhisperModel; print("ready")']))
   await check('Supabase queue migration (read-only)', async () => {
     const response = await fetch(`${cfg.supabaseUrl}/rest/v1/`, { headers: { apikey: cfg.serviceRoleKey, Authorization: `Bearer ${cfg.serviceRoleKey}`, Accept: 'application/openapi+json' }, signal: AbortSignal.timeout(15000) })

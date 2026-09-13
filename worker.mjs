@@ -1,4 +1,5 @@
 import path from 'node:path'
+import { trackFaces, trackingSummary, animatePlan } from './motion.mjs'
 import { restorePreparedEdit } from './recovery.mjs'
 import { pathToFileURL } from 'node:url'
 import { createRequire } from 'node:module'
@@ -41,10 +42,15 @@ async function previousEdit(job, cfg, signal) {
 export async function renderPlan(projectDir, plan, media, signal) {
   const assets = path.join(projectDir, 'assets')
   await copyFile(require.resolve('gsap/dist/gsap.min.js'), path.join(assets, 'gsap.min.js'))
+  // Use one codec/fps/resolution contract for extraction; retain the original.
+  // 4K/60fps sources can exhaust decoder resources when reused across many cuts.
+  await run(ffmpeg, ['-y', '-threads', '2', '-i', path.join(assets, 'main.mp4'), '-map', '0:v:0', '-map', '0:a?',
+    '-vf', "scale=w='min(1920,iw)':h='min(1920,ih)':force_original_aspect_ratio=decrease:force_divisible_by=2,fps=30",
+    '-c:v', 'libx264', '-threads', '2', '-preset', 'veryfast', '-crf', '18', '-g', '30', '-keyint_min', '30', '-sc_threshold', '0', '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-b:a', '192k', '-movflags', '+faststart', path.join(assets, 'main-render.mp4')], { signal })
   if (media.music && !plan.muteOutput && plan.musicVolume > 0) {
     await run(ffmpeg, ['-y', '-stream_loop', '-1', '-i', path.join(assets, 'music.mp3'), '-t', String(plan.duration), '-af', `afade=t=in:d=0.7,afade=t=out:st=${Math.max(0,plan.duration-1)}:d=1`, '-c:a', 'aac', path.join(assets, 'music-loop.m4a')], { signal })
   }
-  await writeFile(path.join(projectDir, 'index.html'), buildComposition(plan, { mainHasAudio: media.main.hasAudio, hasMusic: Boolean(media.music) }))
+  await writeFile(path.join(projectDir, 'index.html'), buildComposition(plan, { mainHasAudio: media.main.hasAudio, hasMusic: Boolean(media.music), preparedMain: true }))
   await writeFile(path.join(projectDir, 'edit-plan.json'), JSON.stringify(plan, null, 2))
   await hyperframes(['lint'], { cwd: projectDir, signal })
   const output = path.join(projectDir, 'master.mp4')
@@ -154,11 +160,22 @@ async function editVideo(job, cfg, signal, progress) {
   }
     await writeFile(path.join(projectDir, 'asset-manifest.json'), JSON.stringify(acquiredAssets || { generatedBrolls: [], music: null }))
   }
+  let faceTracks = null
+  if (/zoom|refram|face.?track|speaking.person|scale.*keyframe|center.*face/i.test(payload.instructions)) {
+    await progress('track-faces', 'Tracking faces locally for smooth person-centered zoom', 37)
+    faceTracks = await trackFaces(path.join(assets, 'main.mp4'), projectDir, cfg, signal)
+    await progress('track-faces', `Face tracking complete: ${trackingSummary(faceTracks).people.length} tracks; preparing animated framing`, 39)
+  }
   await progress('astra-edit', 'GPT-6 Astra is planning the edit · Low reasoning', 40)
-  const media = { main: { duration: main.duration, hasAudio: main.hasAudio }, brolls, music: music ? { duration: music.duration } : null }
-  const plan = await requestPlan({ instructions: `${payload.instructions}\n${acquiredAssets ? 'Asset acquisition is complete. Any generated B-rolls and selected music listed in media are available to use; do not request further generation. Include newly acquired assets while respecting explicit removal requests for previous assets.' : ''}`, media, transcript, previousPlan: previous?.result?.editPlan || (previous ? { previousInstructions: previous.payload?.instructions || '' } : null), images, projectDir }, cfg, signal)
+  const media = { main: { duration: main.duration, hasAudio: main.hasAudio }, brolls, music: music ? { duration: music.duration } : null, faceTracking: trackingSummary(faceTracks) }
+  let plan = await requestPlan({ instructions: `${payload.instructions}\n${acquiredAssets ? 'Asset acquisition is complete. Any generated B-rolls and selected music listed in media are available to use; do not request further generation. Include newly acquired assets while respecting explicit removal requests for previous assets.' : ''}`, media, transcript, previousPlan: previous?.result?.editPlan || (previous ? { previousInstructions: previous.payload?.instructions || '' } : null), images, projectDir }, cfg, signal)
   if (payload.requestedActions?.muteOutput) plan.muteOutput = true
   validatePlan(plan, media)
+  if (plan.segments.some(segment => segment.motion)) {
+    if (!faceTracks && plan.segments.some(segment => segment.motion?.followFace)) faceTracks = await trackFaces(path.join(assets, 'main.mp4'), projectDir, cfg, signal)
+    const dimensions = main.streams.find(stream => stream.codec_type === 'video')
+    plan = animatePlan(plan, faceTracks, dimensions)
+  }
   await progress('render', 'HyperFrames is rendering the edited video', 65)
   const outputPath = await renderPlan(projectDir, plan, media, signal)
   await progress('upload', 'Uploading the edited MP4 for playback', 92)
@@ -228,7 +245,7 @@ async function main() {
   const controller = new AbortController()
   for (const signal of ['SIGINT','SIGTERM']) process.on(signal, () => controller.abort(new Error('Worker stopped.')))
   const log = createLogger(cfg)
-  log.emit('ready', `model=${cfg.model} reasoning=${cfg.effort} Waiting for jobs`)
+  log.emit('ready', `model=${cfg.model} reasoning=${cfg.effort} capabilities=resume,animated_zoom,face_tracking Waiting for jobs`)
   while (!controller.signal.aborted) {
     try {
       const rows = await rpc(cfg, 'claim_hyperframes_video_edit_job', { p_worker_id: cfg.workerId, p_lease_seconds: 900 }, controller.signal)

@@ -149,3 +149,24 @@ trigger paid replacement generation. Earlier asset-stage failures require Restar
 Restart reruns the original payload from the beginning and can spend generation
 allowance again. Neither action adds support for unsupported editing effects.
 Run `npm run smoke` then `npm run smoke:recovery` to verify local restoration/rendering.
+
+
+## Animated person-centered zoom
+
+Run `.venv/Scripts/python.exe -m pip install -r requirements.txt` after pulling this
+update. The bundled OpenCV YuNet face detector runs locally, without an API key or
+remote media upload. `npm run doctor` checks the tracker and its model.
+Astra can now request eased scale/position animation, a 0.8–1.2 second zoom ramp,
+manual focal points, and face-following per segment. Default subtle zoom is 1.12x.
+The worker samples faces at 5 fps, smooths positions and renders interpolated crop
+transforms at 30 fps. Crops are clamped to keep all frame edges covered, so faces
+near the edge cannot always be placed at the exact center at only 1.1x zoom.
+Automatic multi-person focus uses visual mouth-motion and face-size heuristics;
+it is not guaranteed speaker identification. The planner can select an explicit
+face track per segment. Brief occlusions retain focus; missing faces are reported.
+The YuNet model and its license are bundled from
+https://github.com/opencv/opencv_zoo/tree/main/models/face_detection_yunet .
+
+A failed database job may store its stage as `failed`. Resume is therefore offered
+for attempted HyperFrames jobs and validates the actual local checkpoint before
+processing. It never guesses that assets are present based on the progress label.
