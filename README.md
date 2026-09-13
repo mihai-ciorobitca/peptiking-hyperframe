@@ -10,7 +10,7 @@ In the normal AI Edit prompt, ask for the whole job, for example:
 
 > Create two relevant cinematic B-roll clips, choose fashion background music from Pixabay, add English captions, keep my voice clear, and assemble the finished vertical video.
 
-Astra plans the missing assets, the existing Google Flow service generates up to three clips, Astra selects a track from Pixabay's fashion search using track metadata, and HyperFrames assembles the result. Uploaded assets are preserved. Explicit requests for no music/no new footage are passed to the planner; muted output never triggers a music download. Simple trim/caption fixes and revisions should not acquire unrequested assets.
+Astra plans the missing assets, the existing Google Flow service generates up to six clips, Astra selects a track from Pixabay's fashion search using track metadata, and HyperFrames assembles the result. Uploaded assets are preserved. Explicit requests for no music/no new footage are passed to the planner; muted output never triggers a music download. Simple trim/caption fixes and revisions should not acquire unrequested assets.
 
 **For this PeptiKing installation, the existing Flow connection has been provisioned in encrypted Supabase Vault.** The worker retrieves it using its existing Supabase login; no additional keys are needed on the laptop. Other installations must apply `asset-connection.sql` and provision a Vault secret named `peptiking_hyperframes_flow`, containing a JSON object with `url` and `key` for their existing Flow service. Only `service_role` can call the connection function. Optional `FLOW_API_URL`/`FLOW_API_KEY` worker environment overrides are supported.
 

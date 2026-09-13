@@ -22,7 +22,7 @@ const result = await acquireMusic('Soft fashion music', projectDir, {}, AbortSig
     })
     await browser.route('**/*', async route => {
       const url = route.request().url()
-      if (url === 'https://pixabay.com/music/search/fashion/') return route.fulfill({ contentType: 'text/html', body: '<div class="audioRow--fixture"><a href="/music/fashion-one-111/">Fashion one</a>Energetic</div><div class="audioRow--fixture"><a href="/music/fashion-two-222/">Fashion two</a>Soft instrumental</div>' })
+      if (url === 'https://pixabay.com/music/search/fashion/') return route.fulfill({ contentType: 'text/html', body: '<a href="/music/" style="display:none">Music navigation</a><a href="/music/hidden-999/" style="display:none">Hidden track</a><div class="audioRow--fixture"><a href="/music/fashion-one-111/">Fashion one</a>Energetic</div><div class="audioRow--fixture"><a href="https://pixabay.com/music/fashion-two-222/">Fashion two</a>Soft instrumental</div>' })
       if (url === selectedUrl) return route.fulfill({ contentType: 'text/html', body: '<a href="/users/test-123/">Test artist</a><button onclick="location.href=\'/fixture.mp3\'">Free download</button>' })
       if (url === 'https://pixabay.com/fixture.mp3') return route.fulfill({ contentType: 'audio/mpeg', headers: { 'Content-Disposition': 'attachment; filename="fashion.mp3"' }, body: bytes })
       return route.abort()

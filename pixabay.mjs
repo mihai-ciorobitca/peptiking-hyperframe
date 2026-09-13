@@ -26,10 +26,17 @@ export async function acquireMusic(brief, projectDir, cfg, signal, planner = run
     const page = await browser.newPage()
     page.setDefaultTimeout(30000)
     await page.goto(musicSearchUrl, { waitUntil: 'domcontentloaded' })
-    await page.locator('a[href^="/music/"][href$="/"]').first().waitFor()
-    const candidates = await page.locator('a[href^="/music/"]').evaluateAll(links => {
+    // Navigation also contains hidden /music/ links. Wait for real visible tracks.
+    await page.waitForFunction(() => Array.from(document.querySelectorAll('a[href]')).some(link => {
+      const url = new URL(link.href)
+      return url.origin === 'https://pixabay.com' && /^\/music\/[^/]+-\d+\/$/.test(url.pathname) && !url.search && !url.hash && link.getClientRects().length > 0 && getComputedStyle(link).visibility !== 'hidden'
+    }))
+    const candidates = await page.locator('a[href]').evaluateAll(links => {
       const seen = new Set()
-      return links.filter(link => /^\/music\/[^/]+-\d+\/$/.test(link.getAttribute('href') || '')).flatMap(link => {
+      return links.filter(link => {
+        const url = new URL(link.href)
+        return url.origin === 'https://pixabay.com' && /^\/music\/[^/]+-\d+\/$/.test(url.pathname) && !url.search && !url.hash && link.getClientRects().length > 0 && getComputedStyle(link).visibility !== 'hidden'
+      }).flatMap(link => {
         if (seen.has(link.href)) return []
         seen.add(link.href)
         const row = link.closest('[class*="audioRow--"]')
