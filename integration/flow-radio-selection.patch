@@ -1,0 +1,42 @@
+diff --git a/lib/flow-angular.js b/lib/flow-angular.js
+index e0541969..aee182f7 100644
+--- a/lib/flow-angular.js
++++ b/lib/flow-angular.js
+@@ -1,6 +1,16 @@
+ // Flow's current Angular/ProseMirror composer and batchexecute media updates.
+ const UUID = /^[0-9a-f]{8}-[0-9a-f-]{27}$/i;
+ 
++async function selectFlowRadio(control, label, timeoutMs = 5000) {
++  if (await control.isChecked()) return;
++  await control.click();
++  const deadline = Date.now() + timeoutMs;
++  do {
++    if (await control.isChecked()) return;
++    await new Promise(resolve => setTimeout(resolve, 50));
++  } while (Date.now() < deadline);
++  throw new Error(`Flow did not select ${label}`);
++}
+ 
+ function readAngularMedia(text) {
+   const records = new Map();
+@@ -52,12 +62,10 @@ async function generateAngularBatch(page, options) {
+     await page.getByRole('radio', { name: /Video$/ }).click();
+     for (const name of ['x1', `${scene.durationSeconds || 8}s`]) {
+       const control = page.getByRole('radio', { name, exact: true });
+-      await control.click();
+-      if (await control.getAttribute('aria-checked') !== 'true') throw new Error(`Flow did not select ${name}`);
++      await selectFlowRadio(control, name);
+     }
+     const aspect = page.getByRole('radio', { name: new RegExp(`${scene.aspectRatio || '16:9'}$`) });
+-    await aspect.click();
+-    if (await aspect.getAttribute('aria-checked') !== 'true') throw new Error('Flow did not select the requested aspect ratio');
++    await selectFlowRadio(aspect, 'the requested aspect ratio');
+     await page.keyboard.press('Escape');
+     await editor.fill(prompt);
+     if ((await editor.innerText()).trim() !== prompt) throw new Error('Flow did not accept the complete prompt');
+@@ -98,4 +106,4 @@ async function generateAngularBatch(page, options) {
+   return { count: scenes.length, items };
+ }
+ 
+-module.exports = { readAngularMedia, generateAngularBatch };
++module.exports = { readAngularMedia, generateAngularBatch, selectFlowRadio };

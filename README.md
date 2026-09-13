@@ -126,3 +126,12 @@ Credentials and URLs are redacted from logs. Logs contain customer email address
 # Source video size
 
 Source downloads default to 2048 MiB (2 GiB) per file, matching the website's default upload limit. Existing `.env` files inherit this default automatically. To override it, set `HYPERFRAMES_MAX_SOURCE_MB` to a whole number from 1 to 20480 and restart the worker. Downloads stream to disk; failed partial downloads are removed. Larger files still need enough local disk space and must finish within the job processing deadline. Caption-reference and other explicit asset limits remain separate.
+# Live music verification
+
+For a Google Flow service reporting `Flow did not select x1`, apply `integration/flow-radio-selection.patch` in the **Google Flow API repository on the Contabo machine**, then restart that API using its normal process manager. This patch waits for the selected radio state instead of immediately reading a potentially stale ARIA attribute. Updating the laptop worker alone does not update Contabo's browser automation.
+
+`npm run smoke:music:live` tests the real Pixabay search, Astra track selection, native browser download and audio validation. It uses Codex limits and saves one track locally, but does not claim queue jobs, upload files or generate B-roll. Chrome opens visibly by default for this test; set `HYPERFRAMES_MUSIC_HEADLESS=true` to test headless mode.
+
+Opening the search page alone does not verify downloads. If the live test reports a verification or DNS error, run `npm run music:open`, open a track and click **Free download** yourself. Complete any verification or login required by Pixabay. The worker cannot bypass verification or fix the laptop's network. You can also attach an MP3 you are licensed to use in AI Editor; supplied music skips Pixabay acquisition.
+
+Generated footage requires the editing account's B-Roll Creator workspace to be unlocked. This is checked before music acquisition, so a missing workspace does not waste a music download attempt.

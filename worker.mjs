@@ -115,20 +115,24 @@ async function editVideo(job, cfg, signal, progress) {
     await writeFile(path.join(projectDir, 'asset-plan.json'), JSON.stringify(assetPlan, null, 2))
     acquiredAssets ||= { generatedBrolls: [], music: null }
     const flowCfg = assetPlan.scenes.length ? await loadFlowConnection(cfg, signal) : cfg
-    // Music failure is resolved before spending generation allowance.
-    if (assetPlan.music) {
-      await progress('source-music', 'Astra is selecting fashion background music from Pixabay', 31)
-      const selected = await acquireMusic(assetPlan.musicBrief, projectDir, cfg, signal)
-      music = await probe(selected.file, signal)
-      if (!music.hasAudio || music.hasVideo) throw new Error('The downloaded Pixabay file is not an audio track.')
-      acquiredAssets.music = selected.provenance
-    }
+    let owner
     if (assetPlan.scenes.length) {
       const ownerUrl = new URL(`${cfg.supabaseUrl}/rest/v1/User`)
       ownerUrl.search = new URLSearchParams({ id: `eq.${job.user_id}`, select: 'email,aiVideoFlowProjectId', limit: '1' })
       const response = await fetch(ownerUrl, { headers: { apikey: cfg.serviceRoleKey, Authorization: `Bearer ${cfg.serviceRoleKey}` }, signal })
       if (!response.ok) throw new Error('Could not load the B-roll generation project for this edit owner.')
-      const owner = (await response.json())[0]
+      owner = (await response.json())[0]
+      if (!owner?.email || !owner.aiVideoFlowProjectId) throw new Error('Open and unlock B-Roll Creator for this account before requesting generated footage. No music acquisition or Flow generation was started.')
+    }
+    // Music failure is resolved before spending generation allowance.
+    if (assetPlan.music) {
+      await progress('source-music', 'Astra is selecting fashion background music from Pixabay', 31)
+      const selected = await acquireMusic(assetPlan.musicBrief, projectDir, cfg, signal, undefined, undefined, message => progress('source-music', message, 31))
+      music = await probe(selected.file, signal)
+      if (!music.hasAudio || music.hasVideo) throw new Error('The downloaded Pixabay file is not an audio track.')
+      acquiredAssets.music = selected.provenance
+    }
+    if (assetPlan.scenes.length) {
       const generated = await generateScenes(assetPlan.scenes, { email: owner?.email, projectId: owner?.aiVideoFlowProjectId, job }, flowCfg, signal, progress, path.join(projectDir, 'flow-jobs.json'))
       for (const clip of generated) {
         const index = brolls.length + 1

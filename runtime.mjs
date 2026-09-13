@@ -39,7 +39,7 @@ export function config(env = process.env) {
     model, effort, bucket: env.HYPERFRAMES_EXPORT_BUCKET || 'shotstack',
     workerId: `hyperframes-${os.hostname()}-${process.pid}`,
     projectsDir: path.resolve(env.HYPERFRAMES_PROJECTS_DIR || path.join(serviceDir, 'projects')),
-    allowedMediaHosts: new Set([new URL(supabaseUrl).hostname, 'storage.googleapis.com', 'labs.google', 'resource2.heygen.ai', ...(env.HYPERFRAMES_MEDIA_HOSTS || '').split(',').map((host) => host.trim()).filter(Boolean)]),
+    allowedMediaHosts: new Set([new URL(supabaseUrl).hostname, 'storage.googleapis.com', 'labs.google', 'flow-content.google', 'resource2.heygen.ai', ...(env.HYPERFRAMES_MEDIA_HOSTS || '').split(',').map((host) => host.trim()).filter(Boolean)]),
   }
 }
 

@@ -11,6 +11,7 @@
     "music:open": "node --env-file-if-exists=.env pixabay.mjs open-music",
     "smoke:assets": "node --env-file-if-exists=.env smoke-assets.mjs",
     "smoke:music": "node smoke-music.mjs",
+    "smoke:music:live": "node --env-file-if-exists=.env smoke-music-live.mjs",
     "start": "node --env-file=.env worker.mjs",
     "doctor": "node --env-file-if-exists=.env doctor.mjs",
     "test": "node --test *.test.mjs",
