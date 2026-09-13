@@ -37,7 +37,7 @@ export function animatePlan(plan, tracks, dimensions) {
     const duration = segment.sourceEnd - segment.sourceStart
     const sourceFrames = tracks?.frames.filter(f => f.time >= segment.sourceStart && f.time <= segment.sourceEnd) || []
     if (motion.followFace && !sourceFrames.some(f => f.faces.some(face => motion.faceTrackId == null || face.id === motion.faceTrackId))) throw new Error('No visible face was found in a requested face-tracking segment. Use a fixed focal point for this shot.')
-    const targets=[]; let selected=null, lastSwitch=-Infinity, x=motion.targetX, y=motion.targetY
+    const targets=[]; let selected=null, lastSwitch=-Infinity, x=motion.targetX, y=motion.targetY, faceHeight=.15
     const count=Math.ceil(duration*5)
     for(let i=0;i<=count;i++) {
       const time=Math.min(duration,i/5), at=segment.sourceStart+time
@@ -45,11 +45,16 @@ export function animatePlan(plan, tracks, dimensions) {
       if(motion.followFace && frame && Math.abs(frame.time-at)<1) {
         const faces=frame.faces.filter(f=>motion.faceTrackId==null||f.id===motion.faceTrackId)
         let face=faces.find(f=>f.id===selected)
-        const candidate=[...faces].sort((a,b)=>(b.motion+.1)*Math.sqrt(b.w*b.h)-(a.motion+.1)*Math.sqrt(a.w*a.h))[0]
-        if(!face || (candidate && candidate.id!==selected && at-lastSwitch>1.2 && candidate.motion>face.motion*1.8+.08)) {face=candidate;if(face){selected=face.id;lastSwitch=at}}
-        if(face){x=face.x;y=face.y}
+        const sustained = face => {
+          const samples=sourceFrames.filter(f=>Math.abs(f.time-at)<=1).flatMap(f=>f.faces.filter(item=>item.id===face.id))
+          return samples.reduce((sum,f)=>sum+f.motion,0)/Math.max(1,samples.length)
+        }
+        const eligible=faces.filter(f=>f.w*f.h>=Math.max(...faces.map(f=>f.w*f.h),0)*.3)
+        const candidate=[...eligible].sort((a,b)=>sustained(b)-sustained(a))[0]
+        if(!face || (candidate && candidate.id!==selected && at-lastSwitch>1.2 && sustained(candidate)>sustained(face)*1.18+.025)) {face=candidate;if(face){selected=face.id;lastSwitch=at}}
+        if(face){x=face.x;faceHeight=face.h;y=face.y+(motion.framing==='chest-up'?face.h*.5:0)}
       }
-      targets.push({time,x,y})
+      targets.push({time,x,y,faceHeight})
     }
     // Centered smoothing removes detector jitter without accumulating tracking lag.
     const keyframes=targets.map((target,i)=>{
@@ -57,7 +62,10 @@ export function animatePlan(plan, tracks, dimensions) {
       const x=window.reduce((sum,f)=>sum+f.x,0)/window.length, y=window.reduce((sum,f)=>sum+f.y,0)/window.length
       const t=clamp(target.time/Math.min(motion.transitionSeconds,duration),0,1)
       const ease=t*t*(3-2*t)
-      const zoom=motion.zoomFrom+(motion.zoomTo-motion.zoomFrom)*ease
+      const canvasHeight=height*Math.max(1080/width,1920/height)
+      const maxZoom=motion.framing==='chest-up'?10:6
+      const base=motion.framing==='chest-up'?clamp(.32*1920/(canvasHeight*window.reduce((sum,f)=>sum+f.faceHeight,0)/window.length),1,maxZoom):1
+      const zoom=clamp(base*(motion.zoomFrom+(motion.zoomTo-motion.zoomFrom)*ease),1,maxZoom)
       return {time:target.time,...cropTransform(width,height,zoom,x,y)}
     })
     const last = previousSegment?.keyframes.at(-1)
@@ -68,8 +76,15 @@ export function animatePlan(plan, tracks, dimensions) {
         frame.y=clamp(last.y+(frame.y-last.y)*blend,1920-frame.height*frame.scale,0)
       }
     }
-    previousSegment = {...segment,keyframes}
+    previousSegment = {...segment,keyframes,bakedFraming:motion.framing==='chest-up'}
     return previousSegment
   })
   return {...plan,segments}
+}
+
+export async function bakeFraming(projectDir, plan, cfg, signal) {
+  const planFile=path.join(projectDir,'framing-plan.json')
+  await writeFile(planFile,JSON.stringify(plan))
+  await run(cfg.python,[path.join(serviceDir,'bake-framing.py'),'--video',path.join(projectDir,'assets/main.mp4'),'--plan',planFile,'--output',path.join(projectDir,'assets/main-framed-silent.mp4'),'--ffmpeg',ffmpeg],{signal})
+  return path.join(projectDir,'assets/main-framed-silent.mp4')
 }

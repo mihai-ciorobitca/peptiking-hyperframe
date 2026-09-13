@@ -1,10 +1,10 @@
 import path from 'node:path'
-import { trackFaces, trackingSummary, animatePlan } from './motion.mjs'
+import { trackFaces, trackingSummary, animatePlan, bakeFraming } from './motion.mjs'
 import { restorePreparedEdit } from './recovery.mjs'
 import { pathToFileURL } from 'node:url'
 import { createRequire } from 'node:module'
 import { mkdir, writeFile, readFile, copyFile, stat } from 'node:fs/promises'
-import { config, hyperframes, run, probe, ffmpeg } from './runtime.mjs'
+import { config, hyperframes, run, probe, ffmpeg, serviceDir } from './runtime.mjs'
 import { downloadMedia, thumbnail, transcribe } from './media.mjs'
 import { requestPlan, validatePlan } from './plan.mjs'
 import { buildComposition } from './composition.mjs'
@@ -39,18 +39,29 @@ async function previousEdit(job, cfg, signal) {
   return previous
 }
 
-export async function renderPlan(projectDir, plan, media, signal) {
+export async function renderPlan(projectDir, plan, media, signal, cfg = { python: path.join(serviceDir, '.venv', process.platform === 'win32' ? 'Scripts/python.exe' : 'bin/python') }) {
   const assets = path.join(projectDir, 'assets')
   await copyFile(require.resolve('gsap/dist/gsap.min.js'), path.join(assets, 'gsap.min.js'))
-  // Use one codec/fps/resolution contract for extraction; retain the original.
-  // 4K/60fps sources can exhaust decoder resources when reused across many cuts.
-  await run(ffmpeg, ['-y', '-threads', '2', '-i', path.join(assets, 'main.mp4'), '-map', '0:v:0', '-map', '0:a?',
-    '-vf', "scale=w='min(1920,iw)':h='min(1920,ih)':force_original_aspect_ratio=decrease:force_divisible_by=2,fps=30",
-    '-c:v', 'libx264', '-threads', '2', '-preset', 'veryfast', '-crf', '18', '-g', '30', '-keyint_min', '30', '-sc_threshold', '0', '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-b:a', '192k', '-movflags', '+faststart', path.join(assets, 'main-render.mp4')], { signal })
+  let compositionPlan = plan
+  if (plan.segments.some(segment => segment.bakedFraming)) {
+    const framed = await bakeFraming(projectDir, plan, cfg, signal)
+    if (media.main.hasAudio && !plan.muteOutput) {
+      const trims=plan.segments.map((s,i)=>`[0:a]atrim=start=${s.sourceStart}:end=${s.sourceEnd},asetpts=PTS-STARTPTS[a${i}]`)
+      const concat=plan.segments.map((s,i)=>`[a${i}]`).join('')+`concat=n=${plan.segments.length}:v=0:a=1[audio]`
+      await run(ffmpeg,['-y','-i',path.join(assets,'main.mp4'),'-i',framed,'-filter_complex',[...trims,concat].join(';'),'-map','1:v:0','-map','[audio]','-c:v','copy','-c:a','aac','-b:a','192k','-t',String(plan.duration),'-movflags','+faststart',path.join(assets,'main-render.mp4')],{signal})
+    } else await copyFile(framed,path.join(assets,'main-render.mp4'))
+    compositionPlan={...plan,segments:[{sourceStart:0,sourceEnd:plan.duration,zoom:1}]}
+  } else {
+    // Use one codec/fps/resolution contract for extraction; retain the original.
+    // 4K/60fps sources can exhaust decoder resources when reused across many cuts.
+    await run(ffmpeg, ['-y', '-threads', '2', '-i', path.join(assets, 'main.mp4'), '-map', '0:v:0', '-map', '0:a?',
+      '-vf', "scale=w='min(1920,iw)':h='min(1920,ih)':force_original_aspect_ratio=decrease:force_divisible_by=2,fps=30",
+      '-c:v', 'libx264', '-threads', '2', '-preset', 'veryfast', '-crf', '18', '-g', '30', '-keyint_min', '30', '-sc_threshold', '0', '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-b:a', '192k', '-movflags', '+faststart', path.join(assets, 'main-render.mp4')], { signal })
+  }
   if (media.music && !plan.muteOutput && plan.musicVolume > 0) {
     await run(ffmpeg, ['-y', '-stream_loop', '-1', '-i', path.join(assets, 'music.mp3'), '-t', String(plan.duration), '-af', `afade=t=in:d=0.7,afade=t=out:st=${Math.max(0,plan.duration-1)}:d=1`, '-c:a', 'aac', path.join(assets, 'music-loop.m4a')], { signal })
   }
-  await writeFile(path.join(projectDir, 'index.html'), buildComposition(plan, { mainHasAudio: media.main.hasAudio, hasMusic: Boolean(media.music), preparedMain: true }))
+  await writeFile(path.join(projectDir, 'index.html'), buildComposition(compositionPlan, { mainHasAudio: media.main.hasAudio, hasMusic: Boolean(media.music), preparedMain: true }))
   await writeFile(path.join(projectDir, 'edit-plan.json'), JSON.stringify(plan, null, 2))
   await hyperframes(['lint'], { cwd: projectDir, signal })
   const output = path.join(projectDir, 'master.mp4')
@@ -177,7 +188,7 @@ async function editVideo(job, cfg, signal, progress) {
     plan = animatePlan(plan, faceTracks, dimensions)
   }
   await progress('render', 'HyperFrames is rendering the edited video', 65)
-  const outputPath = await renderPlan(projectDir, plan, media, signal)
+  const outputPath = await renderPlan(projectDir, plan, media, signal, cfg)
   await progress('upload', 'Uploading the edited MP4 for playback', 92)
   const fileName = `hyperframes-${job.job_id}.mp4`
   const objectPath = `hyperframes-exports/${job.user_id}/${job.job_id}/${job.attempts}/${fileName}`

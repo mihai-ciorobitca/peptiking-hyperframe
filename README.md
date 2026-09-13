@@ -164,6 +164,17 @@ near the edge cannot always be placed at the exact center at only 1.1x zoom.
 Automatic multi-person focus uses visual mouth-motion and face-size heuristics;
 it is not guaranteed speaker identification. The planner can select an explicit
 face track per segment. Brief occlusions retain focus; missing faces are reported.
+
+For a close shot, request **chest-up framing** explicitly. The renderer sizes the
+crop from the detected face, leaves room for the upper chest, and can crop up to
+10x. These crops are rendered directly from the original source pixels before
+captions, B-roll and music are composited. Use wider framing for exercise/action
+shots. Close crops cannot restore detail absent from the source video.
+
+Example: “Frame each speaker chest-up, follow their face smoothly, keep exercise
+shots wide, retain the existing B-roll, and add quiet Pixabay background music.”
+Pixabay still requires a successful official download. A browser verification
+failure must be resolved on the worker laptop or by uploading a downloaded MP3.
 The YuNet model and its license are bundled from
 https://github.com/opencv/opencv_zoo/tree/main/models/face_detection_yunet .
 
