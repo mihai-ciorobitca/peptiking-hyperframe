@@ -7,6 +7,11 @@ import { config } from './runtime.mjs'
 import { downloadMedia } from './media.mjs'
 
 const env = { SUPABASE_URL: 'https://example.com', SUPABASE_SERVICE_ROLE_KEY: 'test' }
+test('processing deadline defaults to an hour and supports bounded laptop overrides', () => {
+  assert.equal(config(env).jobTimeoutMs, 3600000)
+  assert.equal(config({...env,HYPERFRAMES_JOB_TIMEOUT_MINUTES:'120'}).jobTimeoutMs,7200000)
+  for(const value of ['0','-1','4','241','NaN','Infinity','5.5']) assert.throws(()=>config({...env,HYPERFRAMES_JOB_TIMEOUT_MINUTES:value}),/HYPERFRAMES_JOB_TIMEOUT_MINUTES/)
+})
 test('source limit defaults to website limit and validates overrides', () => {
   assert.equal(config(env).maxSourceBytes, 2 * 1024 ** 3)
   assert.equal(config({ ...env, HYPERFRAMES_MAX_SOURCE_MB: '4096' }).maxSourceBytes, 4 * 1024 ** 3)

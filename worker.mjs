@@ -15,7 +15,6 @@ import { acquireMusic } from './pixabay.mjs'
 import { createLogger, safeLogText } from './logging.mjs'
 
 const require = createRequire(import.meta.url)
-const TIMEOUT_MS = 10 * 60 * 1000
 
 export async function rpc(cfg, name, body, signal) {
   const response = await fetch(`${cfg.supabaseUrl}/rest/v1/rpc/${name}`, {
@@ -207,7 +206,9 @@ export async function handleJob(job, cfg, outerSignal) {
   const log = createLogger(cfg, job)
   log.emit('claimed', `model=${cfg.model} reasoning=${cfg.effort}`)
   const controller = new AbortController()
-  const signal = AbortSignal.any([controller.signal, outerSignal, AbortSignal.timeout(TIMEOUT_MS)])
+  const timeoutMs = cfg.jobTimeoutMs ?? 60 * 60 * 1000
+  const deadline = AbortSignal.timeout(timeoutMs)
+  const signal = AbortSignal.any([controller.signal, outerSignal, deadline])
   let state = { stage: 'starting', message: 'HyperFrames worker connected', percent: 1 }
   let failures = 0
   const progress = async (stage, message, percent) => {
@@ -240,7 +241,9 @@ export async function handleJob(job, cfg, outerSignal) {
     log.emit(accepted ? 'completed' : 'completion-rejected', accepted ? `progress=100% bytes=${result.sizeBytes || 0}` : 'Result was not accepted; check cancellation or lease ownership.')
     return accepted
   } catch (error) {
-    const message = signal.aborted ? String(signal.reason?.message || 'The edit was cancelled or reached the 10-minute processing limit.') : String(error.message || error)
+    const message = signal.aborted && signal.reason === deadline.reason
+      ? `The edit reached the ${timeoutMs / 60000}-minute processing limit during ${state.stage}. Increase HYPERFRAMES_JOB_TIMEOUT_MINUTES, restart the worker, then Resume this failed edit to reuse saved assets.`
+      : signal.aborted ? String(signal.reason?.message || 'The edit was cancelled.') : String(error.message || error)
     clearInterval(timer)
     log.emit(signal.aborted ? 'aborted' : 'failed', `stage=${state.stage} ${message}`)
     try {
@@ -256,7 +259,7 @@ async function main() {
   const controller = new AbortController()
   for (const signal of ['SIGINT','SIGTERM']) process.on(signal, () => controller.abort(new Error('Worker stopped.')))
   const log = createLogger(cfg)
-  log.emit('ready', `model=${cfg.model} reasoning=${cfg.effort} capabilities=resume,animated_zoom,face_tracking Waiting for jobs`)
+  log.emit('ready', `model=${cfg.model} reasoning=${cfg.effort} timeoutMinutes=${cfg.jobTimeoutMs / 60000} capabilities=resume,animated_zoom,face_tracking Waiting for jobs`)
   while (!controller.signal.aborted) {
     try {
       const rows = await rpc(cfg, 'claim_hyperframes_video_edit_job', { p_worker_id: cfg.workerId, p_lease_seconds: 900 }, controller.signal)

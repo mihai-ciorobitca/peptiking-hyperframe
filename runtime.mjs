@@ -24,8 +24,11 @@ export function config(env = process.env) {
   const effort = env.HYPERFRAMES_REASONING_EFFORT || 'low'
   if (model !== 'gpt-6-astra' || effort !== 'low') throw new Error('This worker is configured for gpt-6-astra with low reasoning effort.')
   const maxSourceMb = Number(env.HYPERFRAMES_MAX_SOURCE_MB || 2048)
+  const jobTimeoutMinutes = Number(env.HYPERFRAMES_JOB_TIMEOUT_MINUTES || 60)
+  if (!Number.isSafeInteger(jobTimeoutMinutes) || jobTimeoutMinutes < 5 || jobTimeoutMinutes > 240) throw new Error('HYPERFRAMES_JOB_TIMEOUT_MINUTES must be a whole number between 5 and 240.')
   if (!Number.isSafeInteger(maxSourceMb) || maxSourceMb < 1 || maxSourceMb > 20480) throw new Error('HYPERFRAMES_MAX_SOURCE_MB must be a whole number between 1 and 20480 (MiB).')
   return {
+    jobTimeoutMs: jobTimeoutMinutes * 60 * 1000,
     maxSourceBytes: maxSourceMb * 1024 * 1024,
     supabaseUrl, serviceRoleKey: required('SUPABASE_SERVICE_ROLE_KEY'),
     codexHome: env.HYPERFRAMES_CODEX_HOME || env.CODEX_HOME,

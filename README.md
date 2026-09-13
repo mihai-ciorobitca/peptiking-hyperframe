@@ -18,7 +18,7 @@ Google Flow generation uses the existing service's generation allowance. Astra a
 
 If Pixabay asks for login or verification, stop the worker and run `npm run music:open`, complete the prompt yourself, close that browser, and restart. No verification is bypassed. `HYPERFRAMES_AUTO_ASSETS=false` disables asset acquisition. `npm run smoke:assets` tests Astra's asset planning without generating footage or downloading music.
 
-The overall edit still has a ten-minute processing limit, including generation and rendering; begin with short videos and one or two generated clips. A failed generation cancels known pending Flow jobs; completed generated clips remain in B-Roll Creator. If a submission times out before returning an id, check B-Roll Creator before retrying to avoid duplicate generations.
+The overall edit defaults to a 60-minute processing limit, including generation and rendering. Set HYPERFRAMES_JOB_TIMEOUT_MINUTES (5–240) to override it, then restart the worker. Existing .env files receive the new default without edits. A timeout can be resumed using saved assets; rendering starts again. A failed generation cancels known pending Flow jobs; completed generated clips remain in B-Roll Creator. If a submission times out before returning an id, check B-Roll Creator before retrying to avoid duplicate generations.
 
 ## Install on the other Windows laptop
 
@@ -99,7 +99,7 @@ npm start
 
 ## Supported edits and operation
 
-Main-video cuts; zoom/crop; full-frame silent B-roll with short fades; timed/translated captions; titles; speech/music levels; looped music; muted exports. Output is vertical 1080x1920, 30 fps, H.264 MP4. Source/output length and processing are limited to ten minutes. Start with short clips on slower laptops.
+Main-video cuts; zoom/crop; full-frame silent B-roll with short fades; timed/translated captions; titles; speech/music levels; looped music; muted exports. Output is vertical 1080x1920, 30 fps, H.264 MP4. Source/output length is limited to ten minutes; processing defaults to 60 minutes. Start with short clips on slower laptops.
 
 Word-by-word animation, dubbing, retouching, exact font reproduction and main-scene crossfades are not implemented. New footage is generated through the separate Flow asset stage. Unsupported material requests produce errors. Revisions use the saved plan against original footage.
 
