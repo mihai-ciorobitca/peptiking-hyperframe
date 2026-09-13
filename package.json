@@ -16,7 +16,8 @@
     "doctor": "node --env-file-if-exists=.env doctor.mjs",
     "test": "node --test *.test.mjs",
     "smoke": "node smoke.mjs",
-    "smoke:codex": "node --env-file-if-exists=.env smoke-codex.mjs"
+    "smoke:codex": "node --env-file-if-exists=.env smoke-codex.mjs",
+    "smoke:recovery": "node smoke-recovery.mjs"
   },
   "dependencies": {
     "@openai/codex": "0.154.0",

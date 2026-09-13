@@ -135,3 +135,17 @@ For a Google Flow service reporting `Flow did not select x1`, apply `integration
 Opening the search page alone does not verify downloads. If the live test reports a verification or DNS error, run `npm run music:open`, open a track and click **Free download** yourself. Complete any verification or login required by Pixabay. The worker cannot bypass verification or fix the laptop's network. You can also attach an MP3 you are licensed to use in AI Editor; supplied music skips Pixabay acquisition.
 
 Generated footage requires the editing account's B-Roll Creator workspace to be unlocked. This is checked before music acquisition, so a missing workspace does not waste a music download attempt.
+
+
+## Recovering a failed edit
+
+Update and restart the worker before using AI Studio's recovery buttons.
+Resume is available after asset preparation (planning, rendering or upload failures).
+It uses the same job ID and the original attempt's local projects folder to restore
+footage, generated B-roll, the transcript and soundtrack, then retries planning and
+rendering. It does not regenerate assets. Keep the original projects folder on the
+worker laptop. Missing or incomplete files cause an explicit failure; they never
+trigger paid replacement generation. Earlier asset-stage failures require Restart.
+Restart reruns the original payload from the beginning and can spend generation
+allowance again. Neither action adds support for unsupported editing effects.
+Run `npm run smoke` then `npm run smoke:recovery` to verify local restoration/rendering.

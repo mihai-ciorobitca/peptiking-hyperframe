@@ -1,4 +1,5 @@
 import path from 'node:path'
+import { restorePreparedEdit } from './recovery.mjs'
 import { pathToFileURL } from 'node:url'
 import { createRequire } from 'node:module'
 import { mkdir, writeFile, readFile, copyFile, stat } from 'node:fs/promises'
@@ -68,6 +69,11 @@ async function editVideo(job, cfg, signal, progress) {
   const assets = path.join(projectDir, 'assets')
   await mkdir(assets, { recursive: true })
   const previous = await previousEdit(job, cfg, signal)
+  let main, brolls, images, music, transcript, acquiredAssets
+  if (payload.resumeAttempt != null) {
+    await progress('resume', 'Restoring saved footage and transcript; no asset generation', 35)
+    ;({ main, brolls, images, music, transcript, acquiredAssets } = await restorePreparedEdit(job, cfg, projectDir, signal))
+  } else {
   const inheritedAssets = previous?.result?.acquiredAssets
   const sources = [...payload.brollVideos]
   for (const source of inheritedAssets?.generatedBrolls || []) {
@@ -76,10 +82,10 @@ async function editVideo(job, cfg, signal, progress) {
   if (sources.length > 20) throw new Error('This revision would exceed 20 B-roll sources.')
   await progress('download', 'Downloading the selected video and B-rolls', 5)
   const mainFile = await downloadMedia(payload.mainVideo.url, path.join(assets, 'main.mp4'), cfg, signal)
-  const main = await probe(mainFile, signal)
+  main = await probe(mainFile, signal)
   if (!main.hasVideo || main.duration > 600) throw new Error('HyperFrames needs a main video no longer than 10 minutes.')
-  const brolls = []
-  const images = []
+  brolls = []
+  images = []
   for (const [index, source] of sources.entries()) {
     const file = await downloadMedia(source.url, path.join(assets, `broll-${index+1}.mp4`), cfg, signal)
     const meta = await probe(file, signal)
@@ -87,7 +93,7 @@ async function editVideo(job, cfg, signal, progress) {
     brolls.push({ duration: meta.duration, title: source.title })
     images.push({ label: `B-roll ${index+1}: ${source.title}`, url: await thumbnail(file, Math.min(1,meta.duration/2), path.join(assets, `broll-${index+1}.jpg`), signal) })
   }
-  let music = null
+  music = null
   if (payload.musicTrack) {
     const file = await downloadMedia(payload.musicTrack.url, path.join(assets, 'music.mp3'), cfg, signal)
     music = await probe(file, signal)
@@ -104,9 +110,9 @@ async function editVideo(job, cfg, signal, progress) {
     images.push({ label: 'Requested caption style reference', url: await thumbnail(file, 0, path.join(assets, 'caption-reference.jpg'), signal) })
   }
   await progress('transcribe', 'Transcribing the speech for accurate caption timing', 25)
-  const transcript = main.hasAudio ? await transcribe(mainFile, cfg, signal) : { text: '', words: [] }
+  transcript = main.hasAudio ? await transcribe(mainFile, cfg, signal) : { text: '', words: [] }
   await writeFile(path.join(projectDir, 'transcript.json'), JSON.stringify(transcript))
-  let acquiredAssets = inheritedAssets ? { generatedBrolls: [...(inheritedAssets.generatedBrolls || [])], music: payload.musicTrack ? null : inheritedAssets.music } : null
+  acquiredAssets = inheritedAssets ? { generatedBrolls: [...(inheritedAssets.generatedBrolls || [])], music: payload.musicTrack ? null : inheritedAssets.music } : null
   if (cfg.autoAssets) {
     await progress('plan-assets', 'Astra is planning B-roll and background music', 29)
     const assetPlan = await planAssets({ instructions: payload.instructions, transcript, images, projectDir,
@@ -145,6 +151,8 @@ async function editVideo(job, cfg, signal, progress) {
       }
     }
     await writeFile(path.join(projectDir, 'asset-manifest.json'), JSON.stringify(acquiredAssets, null, 2))
+  }
+    await writeFile(path.join(projectDir, 'asset-manifest.json'), JSON.stringify(acquiredAssets || { generatedBrolls: [], music: null }))
   }
   await progress('astra-edit', 'GPT-6 Astra is planning the edit · Low reasoning', 40)
   const media = { main: { duration: main.duration, hasAudio: main.hasAudio }, brolls, music: music ? { duration: music.duration } : null }
