@@ -1,6 +1,6 @@
 {
   "name": "peptiking-hyperframes-worker",
-  "version": "1.2.1",
+  "version": "1.3.0",
   "private": true,
   "type": "module",
   "engines": {
@@ -18,7 +18,8 @@
     "smoke": "node smoke.mjs",
     "smoke:codex": "node --env-file-if-exists=.env smoke-codex.mjs",
     "smoke:recovery": "node smoke-recovery.mjs",
-    "smoke:framing": "node smoke-framing.mjs"
+    "smoke:framing": "node smoke-framing.mjs",
+    "smoke:transitions": "node smoke-transitions.mjs"
   },
   "dependencies": {
     "@openai/codex": "0.154.0",

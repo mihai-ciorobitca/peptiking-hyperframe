@@ -29,8 +29,14 @@ export function buildComposition(plan, { mainHasAudio = true, hasMusic = false, 
   }
   if (hasMusic && !plan.muteOutput && plan.musicVolume > 0) clips.push(`<audio id="music" src="assets/music-loop.m4a" data-start="0" data-duration="${plan.duration}" data-volume="${plan.musicVolume}" data-track-index="4"></audio>`)
   const fades = plan.brolls.map((clip, index) => {
-    const fade = Math.min(0.18, clip.duration / 4)
-    return `tl.fromTo('#broll-${index}',{opacity:0},{opacity:1,duration:${fade}},${clip.start});tl.to('#broll-${index}',{opacity:0,duration:${fade}},${clip.start + clip.duration - fade});tl.set('#broll-${index}',{opacity:0},${clip.start + clip.duration});`
+    const fade = clip.transitionIn?.type === 'cut' ? 0 : clip.transitionIn?.duration ?? Math.min(0.18, clip.duration / 4)
+    const next=plan.brolls[index+1], end=clip.start+clip.duration
+    // Keep the outgoing shot opaque underneath the incoming dissolve. Fading
+    // both layers exposes the main video in the middle of a B-roll transition.
+    const overlaps=next && next.start < end-0.001
+    const entrance=fade ? `tl.fromTo('#broll-${index}',{opacity:0},{opacity:1,duration:${fade},ease:'none'},${clip.start});` : `tl.set('#broll-${index}',{opacity:1},${clip.start});`
+    const exit=overlaps||!fade ? '' : `tl.to('#broll-${index}',{opacity:0,duration:${fade},ease:'none'},${end-fade});`
+    return `${entrance}${exit}tl.set('#broll-${index}',{opacity:0},${end});`
   }).join('\n')
   return `<!doctype html><html><head><meta charset="utf-8"><title>PeptiKing HyperFrames edit</title>
 <style>html,body{margin:0;background:#000;width:1080px;height:1920px;overflow:hidden;font-family:Arial,sans-serif}#main{position:relative;width:1080px;height:1920px;overflow:hidden}.clip{position:absolute}.footage{inset:0;width:100%;height:100%;object-fit:cover}.broll{z-index:2}.captions,.titles{z-index:3;left:90px;right:90px;display:flex;justify-content:center;text-align:center;line-height:1.22;font-weight:700;overflow-wrap:break-word}.captions{bottom:280px;font-size:42px;color:${plan.captionColor}}.captions span{background:rgba(0,0,0,.78);border-bottom:3px solid ${plan.accentColor};border-radius:14px;padding:14px 22px;white-space:pre-line}.titles{top:180px;color:${plan.accentColor};font-size:56px}.titles span{padding:18px 24px;background:rgba(0,0,0,.82);border-radius:14px}</style>

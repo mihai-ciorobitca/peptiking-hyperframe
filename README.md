@@ -181,3 +181,12 @@ https://github.com/opencv/opencv_zoo/tree/main/models/face_detection_yunet .
 A failed database job may store its stage as `failed`. Resume is therefore offered
 for attempted HyperFrames jobs and validates the actual local checkpoint before
 processing. It never guesses that assets are present based on the progress label.
+
+## B-roll cross-dissolves
+
+B-roll clips support configurable 0.1–2 second cross-dissolves and hard cuts.
+Consecutive clips overlap for the transition; separated cutaways dissolve to and
+from the main video. Captions remain above both clips and speech continues.
+Astra chooses cross-dissolves when the request offers them as an alternative to
+zoom wipes. Zoom wipes remain unsupported when specifically required.
+Run `npm run smoke:transitions` to render and measure a two-clip dissolve locally.
